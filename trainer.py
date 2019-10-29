@@ -8,6 +8,8 @@ import datetime
 from tensorboardX import SummaryWriter
 from recorder import Recorder
 
+import ipdb
+
 
 def epoch(epoch_idx, is_train):
     model.train() if is_train else model.eval()
@@ -46,14 +48,16 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--log_interval', type=int, default=100)
-    parser.add_argument('--glove_path', type=str, default='data/glove.6B.200d.txt')
+    parser.add_argument('--glove_path', type=str, default='data/glove.840B.300d.txt')
     parser.add_argument('--d_embed', type=int, default=200)
     parser.add_argument('--d_hidden', type=int, default=256)
     parser.add_argument('--d_context', type=int, default=256) # msa context vector
     parser.add_argument('--n_word_vocab', type=int, default=10000)
     parser.add_argument('--n_rel_vocab', type=int, default=45)
     parser.add_argument('--n_layer', type=int, default=2)
-    parser.add_argument('--max_decode_len', type=int, default=10)
+    parser.add_argument('--max_sentence_len', type=int, default=150)
+    parser.add_argument('--max_triple_len', type=int, default=50)
+    parser.add_argument('--init_chunk_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--no_cuda', action='store_true')
@@ -61,8 +65,8 @@ if __name__ == '__main__':
 
     device = torch.device("cuda:0" if not args.no_cuda and torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
-    train_loader = dataloader.get_dataloader(args.data_dir, 'train', args.batch_size, args.num_workers)
-    val_loader = dataloader.get_dataloader(args.data_dir, 'val', args.batch_size, args.num_workers)
+    train_loader = dataloader.get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers)
+    val_loader = dataloader.get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
     model = IEMSAModel(args, train_loader.dataset.idx2word)
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), args.lr)
