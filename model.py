@@ -51,6 +51,70 @@ def get_pad_mask(valid_bsz_by_timestep):
         mask[valid_bsz_by_timestep[j]:, j] = 1
     return mask
 
+class CCMModel(nn.Module):
+    def __init__(self, args):
+        self.args = args
+    def forward(self, batch):
+        post_word = self.word_embedding(post_word_idx)  # (b, lp, d_embed)
+        response_word = self.word_embedding(response_word_idx)  # (b, lr, d_embed)
+        response_triple = self.triple_embedding(response_triple_idx)  # (b, lr, t_embed)
+
+        # Static Graph
+        head = self.word_embedding(all_triples[:, :, 0])  # (bt, lt, d_embed)
+        rel = self.rel_embedding(all_triples[:, :, 1])  # (bt, lt, d_embed)
+        tail = self.word_embedding(all_triples[:, :, 2])  # (bt, lt, d_embed)
+        ent = torch.cat([head, tail], -1)  # (bt, lt, 2 * d_embed)
+        static_logit = (torch.self.wr(rel) * torch.tanh(self.wh(head) + self.wt(tail))).sum(-1)  # (bt, lt)
+        if all_triples_mask is not None:
+            static_logit.data.masked_fill_(all_triples_mask, -float('inf'))
+        static_attn = F.softmax(static_logit, dim=-1)  # (bt, lt)
+        static_graph = (ent * static_attn.unsqueeze(-1)).sum(-2)  # (bt, 2 * d_embed)
+        post_triples = static_graph[post_triples_index]  # (b, lp, 2 * d_embed) / gi
+        post_input = torch.cat([post_word, post_triples], -1)  # (b, lp, 3 * d_embed)
+
+        # Encoder
+        packed_post_input = pack_padded_sequence(post_input, lengths=post_len.tolist(), batch_first=True)
+        packed_post_output, gru_hidden = self.gru_enc(packed_post_input)
+        post_output, _ = pad_packed_sequence(packed_post_output, batch_first=True)  # (b, lp, go)
+
+        # Decoder
+        response_input = torch.cat([response_word, response_triple], -1)  # (b, lr, d_embed + t_embed)
+        dec_input = response_input[:, :1, :]  # (b, d_embed + t_embed)
+
+        for t in range(max_decode_len - 1):
+            gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden)  # (b, go) / (b, gh)
+
+            #c
+            context_logit = (post_output * gru_hidden.unsqueeze(-2)).sum(-1) # (b, lp)
+            context_attn = F.softmax(context_logit, dim=-1)  # (b, lp)
+            context_vector = (post_output * context_attn.unsqueeze(-1)).sum(-2)  # (b, go) / c
+
+            #cg
+            dynamic_logit = self.vb(torch.tanh(self.wb(gru_hidden) + self.ub(post_triples))).sum(-1)  # (b, lp)
+            dynamic_attn = F.softmax(dynamic_logit, dim=-1)  # (b, lp)
+            dynamic_graph = (post_triples * dynamic_attn.unsqueeze(-1)).sum(-2)  # (b, 2 * d_embed) / cg
+
+            #ck
+            self.wc(gru_hidden)
+
+            step_output, *_ = self.attn(query=lstm_out, state_keyval=cached_post, knowledge_keyval=cached_graph_vec,
+                                        state_mask=cached_post_mask, knowledge_mask=cached_graph_vec_mask)
+
+            logit = self.out(step_output)  # (b, 1, n_vocab)
+            dec_logits[t] = logit.transpose(0, 1)
+            top1 = logit.max(-1)[1]  # (b, 1)
+
+            # stochastic teacher forcing
+            if random.random() < teacher_force_ratio:
+                dec_input = response[:, t + 1].unsqueeze(1)  # ground truth
+            else:
+                dec_input = top1
+
+        # TODO: inference decode logic.
+
+        return enc_logits, dec_logits.permute(1, 2, 0)
+
+
 
 class IEMSAModel(nn.Module):
     def __init__(self, args, idx2word):
