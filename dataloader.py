@@ -136,13 +136,13 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                     post[i, :pl] = [self.get_word_idx(p) for p in line['post']]
                     response[i, :rl] = [self.get_word_idx(r) for r in line['response']]
 
-                    post_triple[i, :pl] = np.array(line['post_triples']) - 1 # shift [0, 0, 1, 0, 2...] -> [-1, -1, 0, -1, 1...]
+                    post_triple[i, :pl] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
                     response_triple[i, :rl] = [transform_triple_to_hrt(rt) for rt in line['response_triples']]
                     
-                    triple[i] = pad_2d([[transform_triple_to_hrt(t) for t in triples] for triples in line['all_triples']], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
-                    
-                    tmp_entity = pad_2d(line['all_entities'], length=(self.args.max_sentence_len, self.args.max_triple_len))
-                    entity[i] = np.where(tmp_entity > 0, tmp_entity + len(DEFAULT_ENT), 0)
+                    # put NAF_TRIPLE/entity at index 0
+                    triple[i] = pad_2d([[NAF_TRIPLE]] + [[transform_triple_to_hrt(t) for t in triples] for triples in line['all_triples']], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
+                    entity[i] = pad_2d([[NAF_IDX]] + [[e + len(DEFAULT_ENT) for e in entities] for entities in line['all_entities']], length=(self.args.max_sentence_len, self.args.max_triple_len))
+                    # entity[i] = np.where(tmp_entity > 0, tmp_entity + len(DEFAULT_ENT), 0)
 
                 # dump to zarr
                 root['post'][start_i : start_i+n_sample] = post
@@ -220,7 +220,12 @@ def collate_fn(batch):
     entity = torch.tensor([s['entity'] for s in batch]) # (bsz, pl, tl)
     response_triple = torch.tensor([s['response_triple'] for s in batch]) # (bsz, rl, 3)
 
-    max_pl = torch.max(post_length)
+    # Sort in descending length order
+    perm_idx = torch.sort(post_length, descending=True)
+    post, post_length, response, response_length, post_triple, triple, entity, response_triple = \
+        post[perm_idx], post_length[perm_idx], response[perm_idx], response_length[perm_idx], post_triple[perm_idx], triple[perm_idx], entity[perm_idx], response_triple[perm_idx]
+
+    max_pl = post_length[-1]
     max_rl = torch.max(response_length)
     max_tl = torch.max((entity == 0).sum(-1))
 
