@@ -249,7 +249,11 @@ def collate_fn(batch):
 
 if __name__ == "__main__":
     args = {'max_sentence_len': 150, 'max_triple_len': 50, 'init_chunk_size': 10000}
-    dataloader = get_dataloader(args=None, batch_size=2, shuffle=False)
+    class Args(object):
+        def __init__(self, adict):
+            self.__dict__.update(adict)
+    args = Args(args)
+    dataloader = get_dataloader(args=args, batch_size=2, shuffle=False)
     batch = iter(dataloader).next()
 
     for k, v in batch.items():

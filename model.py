@@ -13,10 +13,6 @@ import pandas as pd
 import numpy as np
 import re
 
-PAD_ID = 0
-UNK_ID = 1
-SOS_ID = 2
-EOS_ID = 3
 
 def get_pretrained_glove(path, idx2word, n_special=4):
     saved_glove = path.replace('.txt', '.pt')
@@ -29,7 +25,7 @@ def get_pretrained_glove(path, idx2word, n_special=4):
             try:
                 return words.loc[w].values.astype('float32')
             except KeyError: #_NAF_H, _NAF_R, _NAF_T
-                return np.zeros((200,), dtype='float32')
+                return np.zeros((300,), dtype='float32')
 
         weights = [torch.from_numpy(get_vec(w)) for i, w in list(idx2word.items())[n_special:]]
         weights = torch.stack(weights, dim=0)
@@ -43,364 +39,140 @@ def get_pretrained_glove(path, idx2word, n_special=4):
     return torch.load(saved_glove)
 
 
-def get_pad_mask(valid_bsz_by_timestep):
-    """ 1 for pad """
-    bsz, t = valid_bsz_by_timestep[0], len(valid_bsz_by_timestep)
-    mask = torch.zeros((bsz, t), dtype=torch.bool)
-    for j in range(1, t):
-        mask[valid_bsz_by_timestep[j]:, j] = 1
-    return mask
-
 class CCMModel(nn.Module):
-    def __init__(self, args):
-        self.args = args
-    def forward(self, batch):
-        post_word = self.word_embedding(post_word_idx)  # (b, lp, d_embed)
-        response_word = self.word_embedding(response_word_idx)  # (b, lr, d_embed)
-        response_triple = self.triple_embedding(response_triple_idx)  # (b, lr, t_embed)
-
-        # Static Graph
-        head = self.word_embedding(all_triples[:, :, 0])  # (bt, lt, d_embed)
-        rel = self.rel_embedding(all_triples[:, :, 1])  # (bt, lt, d_embed)
-        tail = self.word_embedding(all_triples[:, :, 2])  # (bt, lt, d_embed)
-        ent = torch.cat([head, tail], -1)  # (bt, lt, 2 * d_embed)
-        static_logit = (torch.self.wr(rel) * torch.tanh(self.wh(head) + self.wt(tail))).sum(-1)  # (bt, lt)
-        if all_triples_mask is not None:
-            static_logit.data.masked_fill_(all_triples_mask, -float('inf'))
-        static_attn = F.softmax(static_logit, dim=-1)  # (bt, lt)
-        static_graph = (ent * static_attn.unsqueeze(-1)).sum(-2)  # (bt, 2 * d_embed)
-        post_triples = static_graph[post_triples_index]  # (b, lp, 2 * d_embed) / gi
-        post_input = torch.cat([post_word, post_triples], -1)  # (b, lp, 3 * d_embed)
-
-        # Encoder
-        packed_post_input = pack_padded_sequence(post_input, lengths=post_len.tolist(), batch_first=True)
-        packed_post_output, gru_hidden = self.gru_enc(packed_post_input)
-        post_output, _ = pad_packed_sequence(packed_post_output, batch_first=True)  # (b, lp, go)
-
-        # Decoder
-        response_input = torch.cat([response_word, response_triple], -1)  # (b, lr, d_embed + t_embed)
-        dec_input = response_input[:, :1, :]  # (b, d_embed + t_embed)
-
-        for t in range(max_decode_len - 1):
-            gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden)  # (b, go) / (b, gh)
-
-            #c
-            context_logit = (post_output * gru_hidden.unsqueeze(-2)).sum(-1) # (b, lp)
-            context_attn = F.softmax(context_logit, dim=-1)  # (b, lp)
-            context_vector = (post_output * context_attn.unsqueeze(-1)).sum(-2)  # (b, go) / c
-
-            #cg
-            dynamic_logit = self.vb(torch.tanh(self.wb(gru_hidden) + self.ub(post_triples))).sum(-1)  # (b, lp)
-            dynamic_attn = F.softmax(dynamic_logit, dim=-1)  # (b, lp)
-            dynamic_graph = (post_triples * dynamic_attn.unsqueeze(-1)).sum(-2)  # (b, 2 * d_embed) / cg
-
-            #ck
-            self.wc(gru_hidden)
-
-            step_output, *_ = self.attn(query=lstm_out, state_keyval=cached_post, knowledge_keyval=cached_graph_vec,
-                                        state_mask=cached_post_mask, knowledge_mask=cached_graph_vec_mask)
-
-            logit = self.out(step_output)  # (b, 1, n_vocab)
-            dec_logits[t] = logit.transpose(0, 1)
-            top1 = logit.max(-1)[1]  # (b, 1)
-
-            # stochastic teacher forcing
-            if random.random() < teacher_force_ratio:
-                dec_input = response[:, t + 1].unsqueeze(1)  # ground truth
-            else:
-                dec_input = top1
-
-        # TODO: inference decode logic.
-
-        return enc_logits, dec_logits.permute(1, 2, 0)
-
-
-
-class IEMSAModel(nn.Module):
     def __init__(self, args, idx2word):
         super().__init__()
         self.args = args
+        print(len(idx2word), args.n_word_vocab)
         assert len(idx2word) == args.n_word_vocab, 'idx2word size does not match designated vocab size'
-        self.n_vocab = args.n_word_vocab
-
+        # self.word_embedding = nn.Embedding(args.n_word_vocab, args.d_embed)
         self.word_embedding = nn.Embedding.from_pretrained(
             get_pretrained_glove(path=args.glove_path, idx2word=idx2word, n_special=4),
             freeze=False, padding_idx=0) # specials: pad, unk, naf_h/t
-        self.rel_embedding = nn.Embedding(args.n_rel_vocab, args.d_embed) # naf_r 빠져야.
+        self.transe_embedding = nn.Embedding(args.n_entity_vocab, args.t_embed)
+        self.wh = nn.Linear(args.t_embed, args.hidden)
+        self.wr = nn.Linear(args.t_embed, args.hidden)
+        self.wt = nn.Linear(args.t_embed, args.hidden)
+        self.gru_enc = nn.GRU(args.d_embed + 2 * args.t_embed, args.gru_hidden)
+        self.gru_dec = nn.GRU(args.gru_hidden + 8 * args.t_embed + args.d_embed, args.gru_hidden)
+        self.out = nn.Linear(args.gru_hidden + 8 * args.t_embed + args.d_embed, args.n_word_vocab)
 
-        # shared by all post encoders and final decoder
-        self.lstm = nn.LSTM(input_size=args.d_embed, hidden_size=args.d_hidden, num_layers=args.n_layer, batch_first=True)
+    def forward(self, batch):
+        post = batch['post']
+        post_length = batch['post_length']
+        response = batch['response']
+        response_length = batch['response_length']
+        post_triple = batch['post_triple']
+        triple = batch['triple']
+        triple_mask = triple.ne(0)
+        entity = batch['entity']
+        response_triple = batch['response_triple']
 
-        # For building graph vector
-        self.graph_attn = GraphAttention(d_embed=args.d_embed, d_proj=args.d_hidden)
+        post_emb = self.word_embedding(post)  # (bsz, pl, d_embed)
+        bsz, rl = response.size()
+        response_emb = self.word_embedding(response)  # (bsz, rl, d_embed)
+        response_triple_emb = self.transe_embedding(response_triple) # (bsz, rl, 3, t_embed)
+        response_triple_emb_flatten = torch.flatten(response_triple_emb, 2) # (bsz, rl, 3 * t_embed)
+        triple_emb = self.transe_embedding(triple) # (bsz, pl, tl, 3, t_embed)
+        triple_emb_flatten = torch.flatten(triple_emb, 3) # (bsz, pl, tl, 3 * t_embed)
 
-        self.attn = MultiSourceAttention(dim=args.d_hidden)
+        # TODO: Transform TransE
 
-        self.out = nn.Linear(args.d_hidden, self.n_vocab) # logit
+        # Static Graph
+        head, rel, tail = torch.split(triple_emb, 1, 3)  # (bsz, pl, tl, t_embed)
+        ent = torch.cat([head, tail], -1).squeeze(-2)  # (bsz, pl, tl, 2 * t_embed)
+        static_logit = (self.wr(rel) * torch.tanh(self.wh(head) + self.wt(tail))).sum(-1).squeeze(-1)  # (bsz, pl, tl)
+        if triple_mask is not None:
+            static_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf'))
+        static_attn = F.softmax(static_logit, dim=-1)  # (bsz, pl, tl)
+        static_graph = (ent * static_attn.unsqueeze(-1)).sum(-2)  # (bsz, pl, 2 * t_embed) / gi
+        post_triples = static_graph[post_triple]  # (bsz, pl, 2 * t_embed)
+        post_input = torch.cat([post_emb, post_triples], -1)  # (bsz, pl, d_emb + 2 * t_embed)
 
-        self.init_weights()
+        # Encoder
+        packed_post_input = pack_padded_sequence(post_input, lengths=post_length.tolist(), batch_first=True)
+        packed_post_output, gru_hidden = self.gru_enc(packed_post_input)
+        post_output, gru_hidden = pad_packed_sequence(packed_post_output, batch_first=True)  # (bsz, pl, go)
 
-    def init_weights(self):
-        # TODO: init lstm hidden
-        pass
+        # Decoder
+        response_input = torch.cat([response_emb, response_triple_emb_flatten], -1)  # (bsz, rl, d_embed + 3 * t_embed)
+        dec_logits = torch.zeros(rl - 1, bsz, self.n_vocab).to(response.device)
 
-    def forward(self, batch, teacher_force_ratio=0.5):
-        # NOTE: 앞뒤로 sos(2), eos(3) 붙어오는 것 가정
-        # mask: (bsz, len, n_triple)
+        for t in range(rl - 1):
+            response_vector = response_input[:, t]  # (bsz, d_embed + 3 * t_embed)
+            #c
+            context_logit = (post_output * gru_hidden.unsqueeze(-2)).sum(-1) # (bsz, pl)
+            context_attn = F.softmax(context_logit, dim=-1)  # (bsz, pl)
+            context_vector = (post_output * context_attn.unsqueeze(-1)).sum(-2)  # (bsz, gru_hidden) / c
 
-        # SW: Would it be better to do this on dataloader?
-        post_lst = [batch['post_1'], batch['post_2'], batch['post_3'], batch['post_4']] # (bsz, timestep)
-        post_length_lst = [batch['post_length_1'], batch['post_length_2'], batch['post_length_3'], batch['post_length_4']] # (bsz)
-        entity_lst = [batch['entity_1'], batch['entity_2'], batch['entity_3'], batch['entity_4']] # (bsz, timestep, n_triple, 3)
-        entity_length_lst = [batch['entity_length_1'], batch['entity_length_2'], batch['entity_length_3'], batch['entity_length_4']] # (bsz, timestep)
-        entity_mask_lst = [batch['entity_mask_1'], batch['entity_mask_2'], batch['entity_mask_3'], batch['entity_mask_4']] # (bsz, timestep, n_triple)
-        response = batch['response'] # (bsz, timestep)
-        ###
+            #cg
+            dynamic_logit = self.vb(torch.tanh(self.wb(gru_hidden) + self.ub(static_graph))).sum(-1)  # (bsz, pl)
+            dynamic_attn = F.softmax(dynamic_logit, dim=-1)  # (bsz, pl)
+            dynamic_graph = (static_graph * dynamic_attn.unsqueeze(-1)).sum(-2)  # (bsz, 2 * t_embed) / cg
 
-        # prev sentence
-        cached_post, cached_post_mask = None, None
-        cached_graph_vec, cached_graph_vec_mask = None, None
-        lstm_hidden = None
+            #ck
+            triple_logit = (triple_emb_flatten * self.wc(gru_hidden).unsqueeze(-2).unsqueeze(-2)).sum(-1) # (bsz, pl, tl)
+            triple_attn = F.softmax(triple_logit, dim=-1) # (bsz, pl, tl)
+            triple_vector = ((triple_emb_flatten * triple_attn.unsqueeze(-1)).sum(-2) * dynamic_attn.unsqueeze(-1)).sum(-1) # (bsz, 3 * t_embed)
 
-        # supervision for encoding
-        enc_logits = [] # for post2~4
+            dec_input = torch.cat([context_vector, dynamic_graph, triple_vector, response_vector], 1).unsqueeze(-1) # (bsz, gru_hidden + 8 * t_embed + d_embed)
+            gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden)  # (bsz, 1, gru_hidden) / (bsz, gru_hidden)
 
-        ### Encode all posts
-        for i in range(4):
-            post, post_len, ent, ent_len, ent_mask = post_lst[i], post_length_lst[i], entity_lst[i], entity_length_lst[i], entity_mask_lst[i]
+            logit = self.out(gru_out)  # (b, 1, n_vocab)
+            dec_logits[t] = logit.transpose(0, 1)
 
-            post = self.word_embedding(post) # (b, l, d_embed)
-
-            head = self.word_embedding(ent[:, :, :, 0]).unsqueeze(-2)
-            rel = self.rel_embedding(ent[:, :, :, 1]).unsqueeze(-2)
-            tail = self.word_embedding(ent[:, :, :, 2]).unsqueeze(-2)
-            ent = torch.cat([head, rel, tail], dim=3) # (b, l, n_triple, 3, d_embed)
-
-            ### Encode post sequence.
-
-            # Sort post sequence by descending length order and pack
-            post_len, perm = post_len.sort(dim=0, descending=True)
-            post = post[perm]
-            packed_post = pack_padded_sequence(post, lengths=post_len.tolist(), batch_first=True)
-
-            # make mask for sequence attention
-            valid_bsz = packed_post.batch_sizes # Effective batch size at each timestep
-            post_mask = get_pad_mask(valid_bsz).unsqueeze(1).to(post.device) # (b, l, l_q)
-            
-            # lstm-encode
-            packed_post, lstm_hidden = self.lstm(packed_post, lstm_hidden)
-
-            # restore post order
-            post, _ = pad_packed_sequence(packed_post, batch_first=True) # restore by padding; (b, l_q, d)
-            _, unperm = perm.sort(dim=0, descending=False)
-            post = post[unperm]
-
-            ### Make graph vector.
-            graph_vec = self.graph_attn(ent, mask=ent_mask)
-            graph_vec_mask = (ent_len == 0).unsqueeze(1) # (b, 1, l_kv); 1 for zero triples
-            
-            if i == 0:
-                enc_output = post
-            else:
-                # attention on previous post
-                enc_output, *_ = self.attn(query=post, state_keyval=cached_post, knowledge_keyval=cached_graph_vec, state_mask=cached_post_mask, knowledge_mask=cached_graph_vec_mask)
-
-            if i > 0:
-                logits = self.out(enc_output[:, :-1, :])  # (b, l, n_vocab)
-                enc_logits.append(logits.transpose(1, 2))
-
-            # cache for later use.
-            cached_post, cached_post_mask, cached_graph_vec, cached_graph_vec_mask = post, post_mask, graph_vec, graph_vec_mask
-
-        ### Decode: supports unrolling.
-        bsz, max_decode_len = response.size()
-        dec_logits = torch.zeros(max_decode_len - 1, bsz, self.n_vocab).to(response.device)
-
-        # SOS token
-        dec_input = response[:, :1] # (b, 1)
-
-        for t in range(max_decode_len - 1):
-            dec_input = self.word_embedding(dec_input)
-
-            # reuse encoder lstm hidden
-            lstm_out, lstm_hidden = self.lstm(dec_input, lstm_hidden)
-
-            step_output, *_ = self.attn(query=lstm_out, state_keyval=cached_post, knowledge_keyval=cached_graph_vec, state_mask=cached_post_mask, knowledge_mask=cached_graph_vec_mask)
-
-            logit = self.out(step_output) # (b, 1, n_vocab)
-            dec_logits[t] = logit.transpose(0,1)
-            top1 = logit.max(-1)[1] # (b, 1)
-
-            # stochastic teacher forcing
-            if random.random() < teacher_force_ratio:
-                dec_input = response[:, t + 1].unsqueeze(1) # ground truth
-            else:
-                dec_input = top1
-
-        # TODO: inference decode logic.
-            
-        return enc_logits, dec_logits.permute(1, 2, 0)
-
-
-class MultiSourceAttention(nn.Module):
-    """ Luong general (bilinear) attention. """
-    def __init__(self, dim):
-        super().__init__()
-        self.W_s = nn.Linear(dim, dim, bias=False) # state attention
-        self.W_k = nn.Linear(dim, dim, bias=False) # knowledge attention (on graph vectors)
-        self.W_msa = nn.Linear(dim*2, dim)
-        self.W_mix = nn.Linear(dim*2, dim)
-        
-    def forward(self, query, state_keyval, knowledge_keyval, state_mask=None, knowledge_mask=None):
-        # query: (bsz, len_q, d) // hidden of this sent
-        # keyval: (bsz, len_kv, d) // hidden or graphvec of previous sent
-        # mask: (bsz, 1, len_kv)
-
-        state_attn = torch.bmm(self.W_s(query), state_keyval.transpose(1, 2)) # (bsz, len_q, len_kv)
-        if state_mask is not None:
-            state_attn.data.masked_fill_(state_mask, -float('inf'))
-        state_attn = F.softmax(state_attn, dim=-1)
-        state_context = torch.bmm(state_attn, state_keyval) # (bsz, len_q, d)
-
-        knowledge_attn = torch.bmm(self.W_k(query), knowledge_keyval.transpose(1, 2)) # (bsz, len_q, len_kv)
-        if knowledge_mask is not None:
-            # knowledge_attn.data.masked_fill_(knowledge_mask, -float('inf'))
-            knowledge_keyval.data.masked_fill_(knowledge_mask.squeeze(1).unsqueeze(-1), 0)
-        knowledge_attn = F.softmax(knowledge_attn, dim=-1)
-        knowledge_context = torch.bmm(knowledge_attn, knowledge_keyval) # (bsz, len_q, d)
-
-        msa_context = self.W_msa(torch.cat([state_context, knowledge_context], dim=-1))
-        # TODO: knowledge_context가 nan이더라도 msa_context는 nan이 아닐 수 있도록.
-
-        # build attentional query
-        combined = torch.cat([query, msa_context], dim=-1) # (bsz, len_q, 2d)
-        output = torch.tanh(self.W_mix(combined)) # (bsz, len_q, d)
-
-        return output, msa_context, state_attn, knowledge_attn
-
-
-class GraphAttention(nn.Module):
-    def __init__(self, d_embed, d_proj):
-        super().__init__()
-        self.W = nn.Linear(d_embed*3, d_embed*3, bias=False)
-        self.proj = nn.Linear(d_embed*2, d_proj, bias=False)
-    
-    def forward(self, entity, mask=None):
-        # entity: (bsz, len, n_triple, 3, d_embed)
-
-        bsz, len, n_triple, _, dim = entity.size()
-        entity = entity.view(-1, len, n_triple, 3*dim)
-
-        h, _, t = entity.chunk(3, dim=-1) # [(b, l, n, d) ..]
-        ht = torch.cat([h, t], dim=-1) # (b, l, n, 2d)
-        ht = self.proj(ht) # (b, l, n, d)
-        if mask is not None:
-            ht.data.masked_fill_(mask.unsqueeze(-1), 0)
-
-        h, r, t = self.W(entity).chunk(3, dim=-1) # [(b, l, n, d) ..]
-
-        attn = (r * torch.tanh(h + t)).sum(-1) # (b, l, n)
-        # if mask is not None:
-        #     attn.data.masked_fill_(mask, -float('inf'))
-        attn = F.softmax(attn, dim=-1) # (b, l, n)
-
-        # # mask for knowledge attention
-        # nan_mask = torch.isnan(attn).sum(-1) > 0 # (b, l)
-
-        context = torch.sum(attn.unsqueeze(-1) * ht, dim=2) # (b, l, d_proj)
-        return context
+        return dec_logits.permute(1, 2, 0)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='parser')
-    parser.add_argument('--glove_path', type=str, default='data/glove.6B.200d.txt')
-    parser.add_argument('--d_embed', type=int, default=200)
-    parser.add_argument('--d_hidden', type=int, default=256)
-    parser.add_argument('--d_context', type=int, default=256) # msa context vector
-    parser.add_argument('--n_word_vocab', type=int, default=100)
-    parser.add_argument('--n_rel_vocab', type=int, default=10)
-    parser.add_argument('--n_layer', type=int, default=2)
-    parser.add_argument('--max_decode_len', type=int, default=10)
+    parser.add_argument('--data_path', type=str, default='data')
+    parser.add_argument('--glove_path', type=str, default='data/glove.840B.300d.txt')
+    parser.add_argument('--d_embed', type=int, default=300)
+    parser.add_argument('--t_embed', type=int, default=100)
+    parser.add_argument('--hidden', type=int, default=128)
+    parser.add_argument('--n_word_vocab', type=int, default=5441)
+    parser.add_argument('--n_entity_vocab', type=int, default=22590)
+    parser.add_argument('--gru_layer', type=int, default=2)
+    parser.add_argument('--gru_hidden', type=int, default=512)
     parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--max_sentence_len', type=int, default=150)
+    parser.add_argument('--max_triple_len', type=int, default=50)
+    parser.add_argument('--init_chunk_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=1234)
+    parser.add_argument('--cuda', type=int, default=0)
     args = parser.parse_args()
+    args.cuda = 'cpu'
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
-
     args.n_word_vocab += 4
 
-    word2idx = {'<pad>': 0, '<unk>': 1, '<sos>': 2, '<eos>': 3}
-    with open('data/glove.6B.200d.txt', 'r') as inf:
-        for line in inf:
-            w = line.split()[0]
-            if w not in word2idx:
-                idx = len(word2idx)
-                word2idx[w] = idx
-        
-            if len(word2idx) == args.n_word_vocab:
-                break
+    from dataloader import get_dataloader
+    import pickle
+    dataloader = get_dataloader(args=args, batch_size=2, shuffle=False)
 
+    with open(f'{args.data_path}/vocab.pkl', 'rb') as vf:
+        word2idx = pickle.load(vf)
     idx2word = {v:k for k, v in word2idx.items()}
-    idx2word = OrderedDict(sorted(idx2word.items(), key=lambda t: t[0]))
-    
-    model = IEMSAModel(args, idx2word)
-    model = model.to('cuda:0')
+    with open(f'{args.data_path}/resource.txt', 'rb') as vf:
+        resource = eval(vf.read())
+    for key, val in resource.items():
+        print(key, len(val))
+    # idx2word = OrderedDict(sorted(idx2word.items(), key=lambda t: t[0]))
 
-    bsz = args.batch_size
-    max_t = 10
-    max_n_triple = 3
+    model = CCMModel(args, idx2word)
+    model = model.to(args.cuda)
 
-    batch = {}
-    for i in range(4):
-        
-        post_k = 'post_{}'.format(i+1)
-        post_len_k = 'post_length_{}'.format(i+1)
-        ent_k = 'entity_{}'.format(i+1)
-        ent_len_k = 'entity_length_{}'.format(i+1)
-        ent_mask_k = 'entity_mask_{}'.format(i+1)
-
-        post_lengths = torch.randint(low=1, high=max_t, size=(bsz,)) # SW: variable name lengths -> post_lengths
-        batch[post_len_k] = torch.LongTensor(post_lengths)
-        max_post_t = post_lengths.max().item()
-
-        batch[post_k] = torch.randint(high=args.n_word_vocab, size=(bsz, max_post_t))
-        for b in range(bsz):
-            batch[post_k][b, post_lengths[b].item():] = 0
-
-        batch[ent_k] = torch.zeros((bsz, max_post_t, max_n_triple, 3), dtype=torch.long)
-        batch[ent_mask_k] = torch.zeros((bsz, max_post_t, max_n_triple), dtype=torch.bool)
-        batch[ent_len_k] = torch.empty(bsz, max_post_t)
-        
-        for t in range(post_lengths[b].item()):
-            # 모든 triple 다 채움
-            batch[ent_k][0, t, :, 0] = batch[post_k][0, t] # head
-            batch[ent_k][0, t, :, 1] = 1 # rel
-            batch[ent_k][0, t, :, 2] = torch.randint(high=args.n_word_vocab, size=(3,)) # tail
-        batch[ent_len_k][0, :] = 3
-
-        for t in range(post_lengths[b].item()):
-            # 첫 두개 triple만 채움
-            batch[ent_k][1, t, :2, 0] = batch[post_k][1, t] # head
-            batch[ent_k][1, t, :2, 1] = 1 # rel
-            batch[ent_k][1, t, :2, 2] = torch.randint(high=args.n_word_vocab, size=(2,)) # tail
-        batch[ent_mask_k][1, :, -1] = 1
-        batch[ent_len_k][1, :] = 2
-        
-        for t in range(post_lengths[-2].item()):
-            # 하나만 채움
-            batch[ent_k][-2, t, :1, 0] = batch[post_k][-2, t] # head
-            batch[ent_k][-2, t, :1, 1] = 1 # rel
-            batch[ent_k][-2, t, :1, 2] = torch.randint(high=args.n_word_vocab, size=(1,)) # tail
-        batch[ent_mask_k][-2, :, -2:] = 1
-        batch[ent_len_k][-2, :] = 1
-        
-        # last batch: no triple
-        batch[ent_mask_k][-1, :, :] = 1
-        batch[ent_len_k][-1, :] = 0
-
-    batch['response'] = torch.randint(high=args.n_word_vocab, size=(bsz, max_t))
-    batch = {key: val.to("cuda:0") for key, val in batch.items()}
+    batch = iter(dataloader).next()
+    batch['post'] = torch.randint(high=args.n_word_vocab, size=batch['post'].size()).long()
+    batch['response'] = torch.randint(high=args.n_word_vocab, size=batch['response'].size()).long()
+    batch['post_triple'] = batch['post_triple'].long()
+    batch['response_triple'] = batch['response_triple'].long()
+    batch['triple'] = batch['triple'].long()
+    batch = {key: val.to(args.cuda) for key, val in batch.items()}
+    for key in batch.keys():
+        print(key, batch[key].size())
 
     model(batch)
