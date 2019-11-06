@@ -17,3 +17,19 @@ Pytorch implementation of 'Commonsense Knowledge Aware Conversation Generation w
 
 5. `pip install -r requirements.txt`
 
+
+
+### Storing ConceptNet triples with RedisGraph
+
+1. Install and build [Redis](https://redis.io) and [RedisGraph](https://oss.redislabs.com/redisgraph/)
+
+2. Open redis-server and load RedisGraph module:
+
+   `redis-server --loadmodule /path/to/module/src/redisgraph.so`
+
+3. `python graph.py` will store triples on your RAM
+
+4. After all triples are stored, `redis-cli bgsave`
+
+5. [Making AOF] For safety, make a backup of your latest dump.rdb file and transfer this backup to a safe place; then `redis-cli config set appendonly yes; redis-cli config set save ""`
+

@@ -4,5 +4,6 @@ zarr==2.3.2
 pathos
 jsonlines
 tqdm
-fuzzywuzzy
+redis>=2.2
 python-Levenshtein
+fuzzywuzzy
