@@ -73,15 +73,17 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         # keys: 'csk_entities', 'dict_csk_entities', 'dict_csk', 'vocab_dict' (no use), 'csk_triples', 'dict_csk_triples'
         
         # update with DEFAULT_VOCAB
-        # idx of each word/entity: resource.txt의 idx + 5
-        self.word2idx = raw_dict['vocab_dict']
-        for k, v in self.word2idx.items():
-            self.word2idx[k] = v + len(DEFAULT_VOCAB)
-        default_dict = {k:v for k, v in zip(DEFAULT_VOCAB, range(len(DEFAULT_VOCAB)))}
-        self.word2idx.update(default_dict)
-        self.word2idx = OrderedDict(sorted(self.word2idx.items(), key=lambda x:x[1]))
-
+        # idx of each word/entity: glove에서의 idx + 4
+        self.word2idx = OrderedDict([*zip(DEFAULT_VOCAB, range(len(DEFAULT_VOCAB)))])
+        with open(f'{self.data_path}/glove.840B.300d.txt', 'r') as glove_f:
+            for i, line in enumerate(glove_f):
+                if i >= 30000:
+                    break
+                k = line.split()[0]
+                self.word2idx[k] = len(self.word2idx)
+        
         # Store vocab
+        print(f'Vocab size: {len(self.word2idx)}')
         with open(f'{self.data_path}/vocab.pkl', 'wb') as df:
             pickle.dump(self.word2idx, df)
 

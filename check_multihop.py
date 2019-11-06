@@ -1,5 +1,6 @@
 import os
 from ast import literal_eval
+import jsonlines
 import redis
 
 rd = redis.StrictRedis()
