@@ -28,8 +28,8 @@ if __name__ == '__main__':
     raw_dict = literal_eval(raw_dict)
 
     # STORE
-    # store_graph(rd, raw_dict['csk_triples'])
+    store_graph(rd, raw_dict['csk_triples'])
 
     # QUERY
-    print(retrieve_graph(rd, 'fawn', raw_dict['csk_entities']))
-    print(retrieve_graph(rd, 'faun', raw_dict['csk_entities']))
+    # print(retrieve_graph(rd, 'fawn', raw_dict['csk_entities']))
+    # print(retrieve_graph(rd, 'faun', raw_dict['csk_entities']))
