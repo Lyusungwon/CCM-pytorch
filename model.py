@@ -156,7 +156,7 @@ class CCMModel(nn.Module):
             triple_vector = ((triple_emb * triple_attn.unsqueeze(-1)).sum(-2) * dynamic_attn.unsqueeze(-1)).sum(-2) # (bsz, 3 * t_embed)
 
             dec_input = torch.cat([context_vector, dynamic_graph, triple_vector, response_vector], 1).unsqueeze(-2) # (bsz, gru_hidden + 8 * t_embed + d_embed)
-            gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden.view(bsz, args.gru_layer, -1))  # (bsz, 1, gru_hidden) / (bsz, gru_hidden)
+            gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden.view(bsz, self.gru_layer, -1))  # (bsz, 1, gru_hidden) / (bsz, gru_hidden)
             gru_hidden = gru_hidden.view(bsz, 1, -1)
 
             logit = self.out(gru_out)  # (bsz, 1, n_vocab)
@@ -192,7 +192,4 @@ if __name__ == "__main__":
 
     model = CCMModel(args, dataloader.dataset.idx2ent, dataloader.dataset.idx2rel)
     batch = iter(dataloader).next()
-    for key in batch.keys():
-        print(key, batch[key].size())
-
     model(batch)
