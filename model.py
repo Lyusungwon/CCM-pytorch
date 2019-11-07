@@ -1,8 +1,6 @@
 import csv
 import argparse
-from collections import OrderedDict
 import random
-
 import os
 import torch
 import torch.nn as nn
@@ -11,51 +9,94 @@ from torch.nn.init import kaiming_uniform_
 from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, PackedSequence
 import pandas as pd
 import numpy as np
-import re
 
 
-def get_pretrained_glove(path, idx2word, n_special=4):
+def get_pretrained_glove(path, n_word=30004):
     saved_glove = path.replace('.txt', '.pt')
     def make_glove():
         print('Reading pretrained glove...')
+        default = ['PAD', 'UNK', 'SOS', 'EOS']
         words = pd.read_csv(path, sep=" ", index_col=0, header=None, quoting=csv.QUOTE_NONE)
         def get_vec(w):
-            # w = re.sub(r'\W+', '', w).lower() # SW: word tokenization needed
-            w = w.lower()
-            try:
-                return words.loc[w].values.astype('float32')
-            except KeyError: #_NAF_H, _NAF_R, _NAF_T
-                return np.zeros((300,), dtype='float32')
+            return words.loc[w].values.astype('float32')
+        weights = [torch.from_numpy(get_vec(w)).unsqueeze(0) for i, w in enumerate(default)]
+        weights.append(torch.from_numpy(words.iloc[:n_word - len(default), :].values.astype('float32')))
+        weights = torch.cat(weights, dim=0)
 
-        weights = [torch.from_numpy(get_vec(w)) for i, w in list(idx2word.items())[n_special:]]
-        weights = torch.stack(weights, dim=0)
-
-        addvec = torch.randn(n_special, weights.size(1))
-        weights = torch.cat([addvec, weights], dim=0)
         torch.save(weights, saved_glove)
         print(f"Glove saved in {saved_glove}")
+        print(weights.size())
     if not os.path.isfile(saved_glove):
         make_glove()
     return torch.load(saved_glove)
 
 
+def get_pretrained(label_path, weight_path, idx2word, dim=100):
+    saved_weight = weight_path.replace('.txt', '.pt')
+    def make_weights():
+        labels = [label for label in open(label_path, 'r').read().split('\n') if label]
+        entity = pd.read_csv(weight_path, sep="\t", header=None, quoting=csv.QUOTE_NONE)
+        entity.index = labels
+        def get_vec(w):
+            try:
+                return entity.loc[w].values.astype('float32')[:dim]
+            except KeyError: #_NAF_H, _NAF_R, _NAF_T
+                print(w)
+                return np.zeros((dim,), dtype='float32')
+
+        weights = [torch.from_numpy(get_vec(w)).unsqueeze(0) for i, w in idx2word.items()]
+        weights = torch.cat(weights, dim=0)
+        torch.save(weights, saved_weight)
+        print(f"Weights saved in {saved_weight}")
+        print(weights.size())
+    if not os.path.isfile(saved_weight):
+        make_weights()
+    return torch.load(saved_weight)
+
+
+def get_pad_mask(valid_bsz_by_timestep):
+    """ 1 for pad """
+    bsz, t = valid_bsz_by_timestep[0], len(valid_bsz_by_timestep)
+    mask = torch.zeros((bsz, t), dtype=torch.bool)
+    for j in range(1, t):
+        mask[valid_bsz_by_timestep[j]:, j] = 1
+    return mask
+
+
 class CCMModel(nn.Module):
-    def __init__(self, args, idx2word):
+    def __init__(self, args, idx2ent, idx2rel):
         super().__init__()
         self.args = args
-        print(len(idx2word), args.n_word_vocab)
-        assert len(idx2word) == args.n_word_vocab, 'idx2word size does not match designated vocab size'
-        # self.word_embedding = nn.Embedding(args.n_word_vocab, args.d_embed)
+        self.n_word_vocab = args.n_word_vocab
+        self.gru_layer = args.gru_layer
+
         self.word_embedding = nn.Embedding.from_pretrained(
-            get_pretrained_glove(path=args.glove_path, idx2word=idx2word, n_special=4),
+            get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_word_vocab),
             freeze=False, padding_idx=0) # specials: pad, unk, naf_h/t
-        self.transe_embedding = nn.Embedding(args.n_entity_vocab, args.t_embed)
+        print(self.word_embedding.weight.size())
+
+        self.entity_embedding = nn.Embedding.from_pretrained(
+            get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=idx2ent),
+            freeze=False, padding_idx=0)
+        print(self.entity_embedding.weight.size())
+
+        self.rel_embedding = nn.Embedding.from_pretrained(
+            get_pretrained(label_path=f'{args.data_dir}/relation.txt', weight_path=f'{args.data_dir}/relation_transE.txt', idx2word=idx2rel),
+            freeze=False)
+        print(self.rel_embedding.weight.size())
+        print(idx2rel)
+
         self.wh = nn.Linear(args.t_embed, args.hidden)
         self.wr = nn.Linear(args.t_embed, args.hidden)
         self.wt = nn.Linear(args.t_embed, args.hidden)
-        self.gru_enc = nn.GRU(args.d_embed + 2 * args.t_embed, args.gru_hidden)
-        self.gru_dec = nn.GRU(args.gru_hidden + 8 * args.t_embed + args.d_embed, args.gru_hidden)
-        self.out = nn.Linear(args.gru_hidden + 8 * args.t_embed + args.d_embed, args.n_word_vocab)
+        self.gru_enc = nn.GRU(args.d_embed + 2 * args.t_embed, args.gru_hidden, args.gru_layer, batch_first=True)
+        self.gru_dec = nn.GRU(args.gru_hidden + 8 * args.t_embed + args.d_embed, args.gru_hidden, args.gru_layer, batch_first=True)
+        self.wa = nn.Linear(args.gru_hidden * args.gru_layer, args.gru_hidden)
+        self.wb = nn.Linear(args.gru_hidden * args.gru_layer, args.hidden)
+        self.ub = nn.Linear(2 * args.t_embed, args.hidden)
+        self.vb = nn.Linear(args.hidden, 1)
+        self.wc = nn.Linear(args.gru_hidden * args.gru_layer, 3 * args.t_embed)
+        self.out = nn.Linear(args.gru_hidden, args.n_word_vocab)
 
     def forward(self, batch):
         post = batch['post']
@@ -64,44 +105,49 @@ class CCMModel(nn.Module):
         response_length = batch['response_length']
         post_triple = batch['post_triple']
         triple = batch['triple']
-        triple_mask = triple.ne(0)
+        triple_mask = triple.eq(0)
         entity = batch['entity']
         response_triple = batch['response_triple']
 
-        post_emb = self.word_embedding(post)  # (bsz, pl, d_embed)
         bsz, rl = response.size()
+        post_emb = self.word_embedding(post)  # (bsz, pl, d_embed)
         response_emb = self.word_embedding(response)  # (bsz, rl, d_embed)
-        response_triple_emb = self.transe_embedding(response_triple) # (bsz, rl, 3, t_embed)
-        response_triple_emb_flatten = torch.flatten(response_triple_emb, 2) # (bsz, rl, 3 * t_embed)
-        triple_emb = self.transe_embedding(triple) # (bsz, pl, tl, 3, t_embed)
-        triple_emb_flatten = torch.flatten(triple_emb, 3) # (bsz, pl, tl, 3 * t_embed)
+        head, rel, tail = torch.split(triple, 1, 3)  # (bsz, pl, tl)
+        head_emb = self.entity_embedding(head.squeeze(-1)) # (bsz, pl, tl, t_embed)
+        rel_emb = self.rel_embedding(rel.squeeze(-1)) # (bsz, pl, tl, t_embed)
+        tail_emb = self.entity_embedding(tail.squeeze(-1)) # (bsz, pl, tl, t_embed)
+        triple_emb = torch.cat([head_emb, rel_emb, tail_emb], 3) # (bsz, pl, tl, 3 * t_embed)
+        res_head, res_rel, res_tail = torch.split(response_triple, 1, 2)  # (bsz, rl, 1)
+        res_head_emb = self.entity_embedding(res_head.squeeze(-1)) # (bsz, rl, t_embed)
+        res_rel_emb = self.rel_embedding(res_rel.squeeze(-1)) # (bsz, rl, t_embed)
+        res_tail_emb = self.entity_embedding(res_tail.squeeze(-1)) # (bsz, rl, t_embed)
+        res_triple_emb = torch.cat([res_head_emb, res_rel_emb, res_tail_emb], 2) # (bsz, rl, 3 * t_embed)
 
         # TODO: Transform TransE
 
         # Static Graph
-        head, rel, tail = torch.split(triple_emb, 1, 3)  # (bsz, pl, tl, t_embed)
-        ent = torch.cat([head, tail], -1).squeeze(-2)  # (bsz, pl, tl, 2 * t_embed)
-        static_logit = (self.wr(rel) * torch.tanh(self.wh(head) + self.wt(tail))).sum(-1).squeeze(-1)  # (bsz, pl, tl)
-        if triple_mask is not None:
-            static_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf'))
+        ent = torch.cat([head_emb, tail_emb], -1).squeeze(-2)  # (bsz, pl, tl, 2 * t_embed)
+        static_logit = (self.wr(rel_emb) * torch.tanh(self.wh(head_emb) + self.wt(tail_emb))).sum(-1).squeeze(-1)  # (bsz, pl, tl)
+        static_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf'))
         static_attn = F.softmax(static_logit, dim=-1)  # (bsz, pl, tl)
         static_graph = (ent * static_attn.unsqueeze(-1)).sum(-2)  # (bsz, pl, 2 * t_embed) / gi
-        post_triples = static_graph[post_triple]  # (bsz, pl, 2 * t_embed)
+        post_triples = static_graph.gather(1, post_triple.unsqueeze(-1).expand(-1, -1, static_graph.size()[-1]))
         post_input = torch.cat([post_emb, post_triples], -1)  # (bsz, pl, d_emb + 2 * t_embed)
 
         # Encoder
         packed_post_input = pack_padded_sequence(post_input, lengths=post_length.tolist(), batch_first=True)
         packed_post_output, gru_hidden = self.gru_enc(packed_post_input)
-        post_output, gru_hidden = pad_packed_sequence(packed_post_output, batch_first=True)  # (bsz, pl, go)
+        post_output, _ = pad_packed_sequence(packed_post_output, batch_first=True)  # (bsz, pl, go)
+        gru_hidden = gru_hidden.view(bsz, 1, -1)
 
         # Decoder
-        response_input = torch.cat([response_emb, response_triple_emb_flatten], -1)  # (bsz, rl, d_embed + 3 * t_embed)
-        dec_logits = torch.zeros(rl - 1, bsz, self.n_vocab).to(response.device)
+        response_input = torch.cat([response_emb, res_triple_emb], -1)  # (bsz, rl, d_embed + 3 * t_embed)
+        dec_logits = torch.zeros(rl - 1, bsz, self.n_word_vocab).to(response.device)
 
         for t in range(rl - 1):
             response_vector = response_input[:, t]  # (bsz, d_embed + 3 * t_embed)
             #c
-            context_logit = (post_output * gru_hidden.unsqueeze(-2)).sum(-1) # (bsz, pl)
+            context_logit = (post_output * self.wa(gru_hidden)).sum(-1) # (bsz, pl)
             context_attn = F.softmax(context_logit, dim=-1)  # (bsz, pl)
             context_vector = (post_output * context_attn.unsqueeze(-1)).sum(-2)  # (bsz, gru_hidden) / c
 
@@ -111,14 +157,15 @@ class CCMModel(nn.Module):
             dynamic_graph = (static_graph * dynamic_attn.unsqueeze(-1)).sum(-2)  # (bsz, 2 * t_embed) / cg
 
             #ck
-            triple_logit = (triple_emb_flatten * self.wc(gru_hidden).unsqueeze(-2).unsqueeze(-2)).sum(-1) # (bsz, pl, tl)
+            triple_logit = (triple_emb * self.wc(gru_hidden).unsqueeze(-2)).sum(-1) # (bsz, pl, tl)
             triple_attn = F.softmax(triple_logit, dim=-1) # (bsz, pl, tl)
-            triple_vector = ((triple_emb_flatten * triple_attn.unsqueeze(-1)).sum(-2) * dynamic_attn.unsqueeze(-1)).sum(-1) # (bsz, 3 * t_embed)
+            triple_vector = ((triple_emb * triple_attn.unsqueeze(-1)).sum(-2) * dynamic_attn.unsqueeze(-1)).sum(-2) # (bsz, 3 * t_embed)
 
-            dec_input = torch.cat([context_vector, dynamic_graph, triple_vector, response_vector], 1).unsqueeze(-1) # (bsz, gru_hidden + 8 * t_embed + d_embed)
-            gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden)  # (bsz, 1, gru_hidden) / (bsz, gru_hidden)
+            dec_input = torch.cat([context_vector, dynamic_graph, triple_vector, response_vector], 1).unsqueeze(-2) # (bsz, gru_hidden + 8 * t_embed + d_embed)
+            gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden.view(bsz, args.gru_layer, -1))  # (bsz, 1, gru_hidden) / (bsz, gru_hidden)
+            gru_hidden = gru_hidden.view(bsz, 1, -1)
 
-            logit = self.out(gru_out)  # (b, 1, n_vocab)
+            logit = self.out(gru_out)  # (bsz, 1, n_vocab)
             dec_logits[t] = logit.transpose(0, 1)
 
         return dec_logits.permute(1, 2, 0)
@@ -126,12 +173,11 @@ class CCMModel(nn.Module):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='parser')
-    parser.add_argument('--data_path', type=str, default='data')
-    parser.add_argument('--glove_path', type=str, default='data/glove.840B.300d.txt')
+    parser.add_argument('--data_dir', type=str, default='data')
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
     parser.add_argument('--hidden', type=int, default=128)
-    parser.add_argument('--n_word_vocab', type=int, default=5441)
+    parser.add_argument('--n_word_vocab', type=int, default=30000)
     parser.add_argument('--n_entity_vocab', type=int, default=22590)
     parser.add_argument('--gru_layer', type=int, default=2)
     parser.add_argument('--gru_hidden', type=int, default=512)
@@ -139,10 +185,8 @@ if __name__ == "__main__":
     parser.add_argument('--max_sentence_len', type=int, default=150)
     parser.add_argument('--max_triple_len', type=int, default=50)
     parser.add_argument('--init_chunk_size', type=int, default=10000)
-    parser.add_argument('--seed', type=int, default=1234)
-    parser.add_argument('--cuda', type=int, default=0)
+    parser.add_argument('--seed', type=int, default=41)
     args = parser.parse_args()
-    args.cuda = 'cpu'
 
     random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -150,28 +194,10 @@ if __name__ == "__main__":
     args.n_word_vocab += 4
 
     from dataloader import get_dataloader
-    import pickle
     dataloader = get_dataloader(args=args, batch_size=2, shuffle=False)
 
-    with open(f'{args.data_path}/vocab.pkl', 'rb') as vf:
-        word2idx = pickle.load(vf)
-    idx2word = {v:k for k, v in word2idx.items()}
-    with open(f'{args.data_path}/resource.txt', 'rb') as vf:
-        resource = eval(vf.read())
-    for key, val in resource.items():
-        print(key, len(val))
-    # idx2word = OrderedDict(sorted(idx2word.items(), key=lambda t: t[0]))
-
-    model = CCMModel(args, idx2word)
-    model = model.to(args.cuda)
-
+    model = CCMModel(args, dataloader.dataset.idx2ent, dataloader.dataset.idx2rel)
     batch = iter(dataloader).next()
-    batch['post'] = torch.randint(high=args.n_word_vocab, size=batch['post'].size()).long()
-    batch['response'] = torch.randint(high=args.n_word_vocab, size=batch['response'].size()).long()
-    batch['post_triple'] = batch['post_triple'].long()
-    batch['response_triple'] = batch['response_triple'].long()
-    batch['triple'] = batch['triple'].long()
-    batch = {key: val.to(args.cuda) for key, val in batch.items()}
     for key in batch.keys():
         print(key, batch[key].size())
 

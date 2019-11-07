@@ -31,7 +31,6 @@ def get_dataloader(args,
                    batch_size=128,
                    shuffle=True,
                    num_workers=4):
-
     dataset = CommonsenseDialDataset(args, data_path, data_name)
     data_loader = torch.utils.data.DataLoader(dataset=dataset,
                                             batch_size=batch_size,
@@ -52,6 +51,9 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         self.vocab_file = f'{self.data_path}/vocab.pkl'
 
         self.rel2idx = self.make_rel_vocab()
+        self.idx2rel = {val: key for key, val in self.rel2idx.items()}
+        self.ent2idx, self.idx2triple = self.make_ent_vocab()
+        self.idx2ent = {val: key for key, val in self.ent2idx.items()}
 
         if not os.path.isfile(self.vocab_file):
             self.init_vocab()
@@ -68,10 +70,6 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
 
 
     def init_vocab(self):
-        raw_dict = open(f'{self.data_path}/resource.txt', 'r').read()
-        raw_dict = literal_eval(raw_dict)
-        # keys: 'csk_entities', 'dict_csk_entities', 'dict_csk', 'vocab_dict' (no use), 'csk_triples', 'dict_csk_triples'
-        
         # update with DEFAULT_VOCAB
         # idx of each word/entity: glove에서의 idx + 4
         self.word2idx = OrderedDict([*zip(DEFAULT_VOCAB, range(len(DEFAULT_VOCAB)))])
@@ -81,7 +79,6 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                     break
                 k = line.split()[0]
                 self.word2idx[k] = len(self.word2idx)
-        
         # Store vocab
         print(f'Vocab size: {len(self.word2idx)}')
         with open(f'{self.data_path}/vocab.pkl', 'wb') as df:
@@ -90,22 +87,13 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
             
     def init_data(self, data_name):
         print(f'Initializing {data_name} data...')
-        raw_dict = open(f'{self.data_path}/resource.txt', 'r').read()
-        raw_dict = literal_eval(raw_dict)
-
-        ent2idx = {k:v+len(DEFAULT_ENT) for k, v in raw_dict['dict_csk_entities'].items()} # 0: _PAD, 1: _NAF; others are mapped to +2
-        default_ent = {k:v for k, v in zip(DEFAULT_ENT, range(len(DEFAULT_ENT)))}
-        ent2idx.update(default_ent)
-
-        idx2triple = {v:k for k, v in raw_dict['dict_csk_triples'].items()}
-
         def transform_triple_to_hrt(triple_idx):
             """ Transforms triple-idx (as a whole) to h/r/t format """
             if triple_idx == -1: # for response_triple
                 return NAF_TRIPLE
-            triple = idx2triple[triple_idx]
+            triple = self.idx2triple[triple_idx]
             h, r, t = triple.split(', ')
-            return [ent2idx[h], self.rel2idx[r], ent2idx[t]]
+            return [self.ent2idx[h], self.rel2idx[r], self.ent2idx[t]]
 
         def process_file(root, inp):
             start_i, filename = inp
@@ -189,16 +177,23 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         response_triple.resize(n_lines, max_response_len, 3)
 
         print(f'Dumped {data_name} at: {self.data_path}/{data_name}set.zarr')
-        
 
     def make_rel_vocab(self):
         # Don't dump; call every time
-        rel2idx = {'_PAD': PAD_IDX, '_UNK': UNK_IDX, '_NAF': NAF_IDX} # 통일성 위해서 unk 둠
+        rel2idx = {'_PAD': PAD_IDX, '_NAF': NAF_IDX} # 통일성 위해서 unk 둠
         with open(f'{self.data_path}/relation.txt', 'r') as relf:
             rel_dict = {line.strip(): i for i, line in enumerate(relf, start=len(rel2idx))}
             rel2idx.update(rel_dict)
         return rel2idx
 
+    def make_ent_vocab(self):
+        raw_dict = open(f'{self.data_path}/resource.txt', 'r').read()
+        raw_dict = literal_eval(raw_dict)
+        ent2idx = {k: v+len(DEFAULT_ENT) for k, v in raw_dict['dict_csk_entities'].items()} # 0: _PAD, 1: _NAF; others are mapped to +2
+        default_ent = {k:v for k, v in zip(DEFAULT_ENT, range(len(DEFAULT_ENT)))}
+        ent2idx.update(default_ent)
+        idx2triple = {v: k for k, v in raw_dict['dict_csk_triples'].items()}
+        return ent2idx, idx2triple
 
     def __len__(self):
         return len(self.data['post'])
@@ -221,11 +216,11 @@ def collate_fn(batch):
     response_triple = torch.tensor([s['response_triple'] for s in batch]) # (bsz, rl, 3)
 
     # Sort in descending length order
-    perm_idx = torch.sort(post_length, descending=True)
+    perm_idx = torch.sort(post_length, descending=True)[1].long()
     post, post_length, response, response_length, post_triple, triple, entity, response_triple = \
         post[perm_idx], post_length[perm_idx], response[perm_idx], response_length[perm_idx], post_triple[perm_idx], triple[perm_idx], entity[perm_idx], response_triple[perm_idx]
 
-    max_pl = post_length[-1]
+    max_pl = post_length[0]
     max_rl = torch.max(response_length)
     max_tl = torch.max((entity == 0).sum(-1))
 
@@ -237,14 +232,14 @@ def collate_fn(batch):
     response_triple = response_triple[:, :max_rl]
 
     batched_data = {
-        'post': post,
+        'post': post.long(),
         'post_length': post_length,
-        'response': response,
+        'response': response.long(),
         'response_length': response_length,
-        'post_triple': post_triple,
-        'triple': triple,
+        'post_triple': post_triple.long(),
+        'triple': triple.long(),
         'entity': entity,
-        'response_triple': response_triple,
+        'response_triple': response_triple.long(),
     }
 
     # def padding(sent, length):
