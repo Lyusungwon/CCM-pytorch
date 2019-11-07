@@ -25,7 +25,6 @@ def get_pretrained_glove(path, n_word=30004):
 
         torch.save(weights, saved_glove)
         print(f"Glove saved in {saved_glove}")
-        print(weights.size())
     if not os.path.isfile(saved_glove):
         make_glove()
     return torch.load(saved_glove)
@@ -48,7 +47,6 @@ def get_pretrained(label_path, weight_path, idx2word, dim=100):
         weights = torch.cat(weights, dim=0)
         torch.save(weights, saved_weight)
         print(f"Weights saved in {saved_weight}")
-        print(weights.size())
     if not os.path.isfile(saved_weight):
         make_weights()
     return torch.load(saved_weight)
@@ -73,18 +71,14 @@ class CCMModel(nn.Module):
         self.word_embedding = nn.Embedding.from_pretrained(
             get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_word_vocab),
             freeze=False, padding_idx=0) # specials: pad, unk, naf_h/t
-        print(self.word_embedding.weight.size())
 
         self.entity_embedding = nn.Embedding.from_pretrained(
             get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=idx2ent),
             freeze=False, padding_idx=0)
-        print(self.entity_embedding.weight.size())
 
         self.rel_embedding = nn.Embedding.from_pretrained(
             get_pretrained(label_path=f'{args.data_dir}/relation.txt', weight_path=f'{args.data_dir}/relation_transE.txt', idx2word=idx2rel),
             freeze=False)
-        print(self.rel_embedding.weight.size())
-        print(idx2rel)
 
         self.wh = nn.Linear(args.t_embed, args.hidden)
         self.wr = nn.Linear(args.t_embed, args.hidden)
