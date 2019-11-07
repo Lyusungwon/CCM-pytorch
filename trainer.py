@@ -1,14 +1,12 @@
 import argparse
 import dataloader
-from model import IEMSAModel
+from model import CCMModel
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import datetime
 from tensorboardX import SummaryWriter
 from recorder import Recorder
-
-import ipdb
 
 
 def epoch(epoch_idx, is_train):
@@ -20,9 +18,7 @@ def epoch(epoch_idx, is_train):
         batch = {key: val.to(device) for key, val in batch.items()}
         optimizer.zero_grad()
         output = model(batch)
-        loss = criterion(output[1], batch['response'][:, 1:])
-        for logit, batch_key in zip(output[0], ['post_2', 'post_3', 'post_4']):
-            loss += criterion(logit, batch[batch_key][:, 1:])
+        loss = criterion(output, batch['response'][:, 1:])
         if is_train:
             loss.backward()
             optimizer.step()
@@ -40,7 +36,7 @@ def train():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='parser')
-    parser.add_argument('--project', type=str, default='iemsa')
+    parser.add_argument('--project', type=str, default='ccm')
     parser.add_argument('--timestamp', type=str, default=datetime.datetime.now().strftime("%y%m%d%H%M%S"))
     parser.add_argument('--data_dir', type=str, default='data')
     parser.add_argument('--log_dir', type=str, default='log')
@@ -48,26 +44,27 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--log_interval', type=int, default=100)
-    parser.add_argument('--glove_path', type=str, default='data/glove.840B.300d.txt')
-    parser.add_argument('--d_embed', type=int, default=200)
-    parser.add_argument('--d_hidden', type=int, default=256)
-    parser.add_argument('--d_context', type=int, default=256) # msa context vector
-    parser.add_argument('--n_word_vocab', type=int, default=10000)
-    parser.add_argument('--n_rel_vocab', type=int, default=45)
-    parser.add_argument('--n_layer', type=int, default=2)
+    parser.add_argument('--d_embed', type=int, default=300)
+    parser.add_argument('--t_embed', type=int, default=100)
+    parser.add_argument('--hidden', type=int, default=128)
+    parser.add_argument('--n_word_vocab', type=int, default=30000)
+    parser.add_argument('--n_entity_vocab', type=int, default=22590)
+    parser.add_argument('--gru_layer', type=int, default=2)
+    parser.add_argument('--gru_hidden', type=int, default=512)
     parser.add_argument('--max_sentence_len', type=int, default=150)
     parser.add_argument('--max_triple_len', type=int, default=50)
     parser.add_argument('--init_chunk_size', type=int, default=10000)
-    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--seed', type=int, default=41)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--no_cuda', action='store_true')
+    parser.add_argument('--cuda', type=int, default=0)
     args = parser.parse_args()
 
-    device = torch.device("cuda:0" if not args.no_cuda and torch.cuda.is_available() else "cpu")
+    device = torch.device(f"cuda:{args.cuda}" if not args.no_cuda and torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
     train_loader = dataloader.get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers)
     val_loader = dataloader.get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
-    model = IEMSAModel(args, train_loader.dataset.idx2word)
+    model = CCMModel(args, train_loader.dataset.idx2ent, train_loader.dataset.idx2rel)
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), args.lr)
     criterion = nn.CrossEntropyLoss(ignore_index=0)
