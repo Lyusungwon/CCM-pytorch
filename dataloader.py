@@ -16,9 +16,6 @@ import torch
 
 from utils import line_count, pad_1d, pad_2d, append_storage, resize_storage
 
-import ipdb
-
-
 DEFAULT_VOCAB = ['_PAD', '_UNK', '_SOS', '_EOS']
 DEFAULT_ENT = ['_PAD', '_NAF']
 PAD_IDX, UNK_IDX, NAF_IDX, SOS_IDX, EOS_IDX = 0, 1, 1, 2, 3
@@ -113,7 +110,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
             with jsonlines.open(filename) as df:
                 for i, line in enumerate(df):
 
-                    pl, rl = len(line['post']), len(line['response'])
+                    pl, rl = len(line['post']) + 2, len(line['response']) + 2
                     post_length[i] = pl
                     response_length[i] = rl
 
@@ -121,11 +118,10 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                     max_response_len = max(rl, max_response_len)
                     max_triple_len = max([len(l) for l in line['all_triples']] + [max_triple_len])
 
-                    post[i, :pl] = [self.get_word_idx(p) for p in line['post']]
-                    response[i, :rl] = [self.get_word_idx(r) for r in line['response']]
-
-                    post_triple[i, :pl] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
-                    response_triple[i, :rl] = [transform_triple_to_hrt(rt) for rt in line['response_triples']]
+                    post[i, :pl] = [2] + [self.get_word_idx(p) for p in line['post']] + [3]
+                    response[i, :rl] = [2] + [self.get_word_idx(r) for r in line['response']] + [3]
+                    post_triple[i, 1:pl-1] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
+                    response_triple[i, 1:rl-1] = [transform_triple_to_hrt(rt) for rt in line['response_triples']]
                     
                     # put NAF_TRIPLE/entity at index 0
                     triple[i] = pad_2d([[NAF_TRIPLE]] + [[transform_triple_to_hrt(t) for t in triples] for triples in line['all_triples']], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
