@@ -16,7 +16,7 @@ def get_pretrained_glove(path, n_word=30004):
     saved_glove = path.replace('.txt', '.pt')
     def make_glove():
         print('Reading pretrained glove...')
-        default = ['PAD', 'UNK', 'SOS', 'EOS']
+        default = ['_PAD', '_UNK', '_SOS', '_EOS']
         words = pd.read_csv(path, sep=" ", index_col=0, header=None, quoting=csv.QUOTE_NONE)
         def get_vec(w):
             return words.loc[w].values.astype('float32')
@@ -97,7 +97,7 @@ class CCMModel(nn.Module):
         self.ub = nn.Linear(2 * args.t_embed, args.hidden)
         self.vb = nn.Linear(args.hidden, 1)
         self.wc = nn.Linear(args.gru_hidden * args.gru_layer, 3 * args.t_embed)
-        self.out = nn.Linear(args.gru_hidden, args.n_word_vocab)
+        self.wo = nn.Linear(args.gru_hidden, args.n_word_vocab)
 
     def forward(self, batch):
         post = batch['post']
@@ -129,14 +129,14 @@ class CCMModel(nn.Module):
 
         # Static Graph
         ent = torch.cat([head_emb, tail_emb], -1)  # (bsz, pl, tl, 2 * t_embed)
-        mask = get_pad_mask(post_triple.max(1)[0], ent.size()[1]).to(device)
-        ent.data.masked_fill_(mask.unsqueeze(-1).unsqueeze(-1), 0)
+        mask = get_pad_mask(post_triple.max(1)[0], ent.size(1)).to(device)
+        ent.data.masked_fill_(mask.view(*mask.size(), 1, 1), 0)
         static_logit = (self.wr(rel_emb) * torch.tanh(self.wh(head_emb) + self.wt(tail_emb))).sum(-1, keepdim=False)  # (bsz, pl, tl)
         static_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf'))
         static_logit.data.masked_fill_(mask.unsqueeze(-1), 0)
         static_attn = F.softmax(static_logit, dim=-1)  # (bsz, pl, tl)
         static_graph = (ent * static_attn.unsqueeze(-1)).sum(-2)  # (bsz, pl, 2 * t_embed) / gi
-        post_triples = static_graph.gather(1, post_triple.unsqueeze(-1).expand(-1, -1, static_graph.size()[-1]))
+        post_triples = static_graph.gather(1, post_triple.unsqueeze(-1).expand_as(static_graph))
         post_input = torch.cat([post_emb, post_triples], -1)  # (bsz, pl, d_emb + 2 * t_embed)
 
         # Encoder

@@ -44,25 +44,26 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         assert data_name in ['train', 'test', 'valid'], "Data name should be among ['train', 'test', 'valid']."
         self.args = args
         self.data_path = data_path
-        self.data_dump = f'{self.data_path}/{data_name}set.zarr'
-        self.vocab_file = f'{self.data_path}/vocab.pkl'
+        
+        data_dump = f'{self.data_path}/{data_name}set.zarr'
+        vocab_file = f'{self.data_path}/vocab.pkl'
+
+        if not os.path.isfile(vocab_file):
+            self.init_vocab()
+        else:
+            with open(vocab_file, 'rb') as vf:
+                self.word2idx = pickle.load(vf)
 
         self.rel2idx = self.make_rel_vocab()
         self.idx2rel = {val: key for key, val in self.rel2idx.items()}
-        self.ent2idx, self.idx2triple = self.make_ent_vocab()
+        self.ent2idx, self.ent2vocab, self.idx2triple = self.make_ent_vocab()
         self.idx2ent = {val: key for key, val in self.ent2idx.items()}
-
-        if not os.path.isfile(self.vocab_file):
-            self.init_vocab()
-        else:
-            with open(f'{self.data_path}/vocab.pkl', 'rb') as vf:
-                self.word2idx = pickle.load(vf)
         
-        if not os.path.exists(self.data_dump):
+        if not os.path.exists(data_dump):
             self.init_data(data_name)
 
         # load
-        self.data = zarr.open(self.data_dump, mode='r')
+        self.data = zarr.open(data_dump, mode='r')
         self.idx2word = OrderedDict([(v, k) for k, v in self.word2idx.items()])
 
 
@@ -131,7 +132,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                 # dump to zarr
                 root['post'][start_i : start_i+n_sample] = post
                 root['post_length'][start_i : start_i+n_sample] = post_length
-                root['response'][start_i : start_i+n_sample] = post
+                root['response'][start_i : start_i+n_sample] = response
                 root['response_length'][start_i : start_i+n_sample] = response_length
                 root['post_triple'][start_i : start_i+n_sample] = post_triple
                 root['triple'][start_i : start_i+n_sample] = triple
@@ -188,8 +189,13 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         ent2idx = {k: v+len(DEFAULT_ENT) for k, v in raw_dict['dict_csk_entities'].items()} # 0: _PAD, 1: _NAF; others are mapped to +2
         default_ent = {k:v for k, v in zip(DEFAULT_ENT, range(len(DEFAULT_ENT)))}
         ent2idx.update(default_ent)
+
+        # idx mapping, for final word distribution
+        # 1 if entity is not in generic vocab
+        ent2vocab = {v: self.get_word_idx(k) for k, v in ent2idx.items()} 
+        
         idx2triple = {v: k for k, v in raw_dict['dict_csk_triples'].items()}
-        return ent2idx, idx2triple
+        return ent2idx, ent2vocab, idx2triple
 
     def __len__(self):
         return len(self.data['post'])
