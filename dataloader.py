@@ -131,7 +131,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                 # dump to zarr
                 root['post'][start_i : start_i+n_sample] = post
                 root['post_length'][start_i : start_i+n_sample] = post_length
-                root['response'][start_i : start_i+n_sample] = post
+                root['response'][start_i : start_i+n_sample] = response
                 root['response_length'][start_i : start_i+n_sample] = response_length
                 root['post_triple'][start_i : start_i+n_sample] = post_triple
                 root['triple'][start_i : start_i+n_sample] = triple
