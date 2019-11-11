@@ -16,9 +16,9 @@ import torch
 
 from utils import line_count, pad_1d, pad_2d, append_storage, resize_storage
 
-DEFAULT_VOCAB = ['_PAD', '_UNK', '_SOS', '_EOS']
-DEFAULT_ENT = ['_PAD', '_NAF']
-PAD_IDX, UNK_IDX, NAF_IDX, SOS_IDX, EOS_IDX = 0, 1, 1, 2, 3
+DEFAULT_VOCAB = ['_PAD', '_UNK', '_SOS', '_EOS', '_NAF']
+# DEFAULT_ENT = ['_PAD', '_NAF']
+PAD_IDX, UNK_IDX, SOS_IDX, EOS_IDX, NAF_IDX = 0, 1, 2, 3, 4
 NAF_TRIPLE = [NAF_IDX, NAF_IDX, NAF_IDX]
 
 
@@ -48,39 +48,52 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         data_dump = f'{self.data_path}/{data_name}set.zarr'
         vocab_file = f'{self.data_path}/vocab.pkl'
 
+        self.rel2idx = self.make_rel_vocab()
+        self.idx2rel = {val: key for key, val in self.rel2idx.items()}
+
         if not os.path.isfile(vocab_file):
-            self.init_vocab()
+            self.entidx2wordidx = self.init_vocab() # only used for init_data
+            self.idx2triple = self.make_triple_vocab()
         else:
             with open(vocab_file, 'rb') as vf:
                 self.word2idx = pickle.load(vf)
-
-        self.rel2idx = self.make_rel_vocab()
-        self.idx2rel = {val: key for key, val in self.rel2idx.items()}
-        self.ent2idx, self.ent2vocab, self.idx2triple = self.make_ent_vocab()
-        self.idx2ent = {val: key for key, val in self.ent2idx.items()}
         
-        if not os.path.exists(data_dump):
-            self.init_data(data_name)
+        self.idx2word = OrderedDict([(v, k) for k, v in self.word2idx.items()])
 
+        if not os.path.isfile(data_dump):
+            self.init_data(data_name)
         # load
         self.data = zarr.open(data_dump, mode='r')
-        self.idx2word = OrderedDict([(v, k) for k, v in self.word2idx.items()])
 
 
     def init_vocab(self):
-        # update with DEFAULT_VOCAB
-        # idx of each word/entity: glove에서의 idx + 4
+        # First add DEFAULT_VOCAB
+        # idx of each word/entity: glove에서의 idx + 5
         self.word2idx = OrderedDict([*zip(DEFAULT_VOCAB, range(len(DEFAULT_VOCAB)))])
+        
+        # Then add Glove vocabs (30000)
         with open(f'{self.data_path}/glove.840B.300d.txt', 'r') as glove_f:
             for i, line in enumerate(glove_f):
-                if i >= 30000:
+                if i >= self.args.n_word_vocab:
                     break
                 k = line.split()[0]
                 self.word2idx[k] = len(self.word2idx)
+
+        # Now add entity vocab that are not in glove
+        entidx2wordidx = {} # maps entity idx in 'resources.txt' to word idx
+        raw_dict = open(f'{self.data_path}/resource.txt', 'r').read()
+        raw_dict = literal_eval(raw_dict)
+        for ent, idx in raw_dict['dict_csk_entities'].items():
+            if ent not in self.word2idx:
+                self.word2idx[ent] = len(self.word2idx)
+            entidx2wordidx[idx] = self.word2idx[ent]
+
         # Store vocab
         print(f'Vocab size: {len(self.word2idx)}')
         with open(f'{self.data_path}/vocab.pkl', 'wb') as df:
             pickle.dump(self.word2idx, df)
+        
+        return entidx2wordidx
 
             
     def init_data(self, data_name):
@@ -91,7 +104,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                 return NAF_TRIPLE
             triple = self.idx2triple[triple_idx]
             h, r, t = triple.split(', ')
-            return [self.ent2idx[h], self.rel2idx[r], self.ent2idx[t]]
+            return [self.word2idx[h], self.rel2idx[r], self.word2idx[t]]
 
         def process_file(root, inp):
             start_i, filename = inp
@@ -126,8 +139,8 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                     
                     # put NAF_TRIPLE/entity at index 0
                     triple[i] = pad_2d([[NAF_TRIPLE]] + [[transform_triple_to_hrt(t) for t in triples] for triples in line['all_triples']], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
-                    entity[i] = pad_2d([[NAF_IDX]] + [[e + len(DEFAULT_ENT) for e in entities] for entities in line['all_entities']], length=(self.args.max_sentence_len, self.args.max_triple_len))
-                    # entity[i] = np.where(tmp_entity > 0, tmp_entity + len(DEFAULT_ENT), 0)
+                    entity[i] = pad_2d([[NAF_IDX]] + [[self.entidx2wordidx[e] for e in entities] for entities in line['all_entities']], length=(self.args.max_sentence_len, self.args.max_triple_len))
+
 
                 # dump to zarr
                 root['post'][start_i : start_i+n_sample] = post
@@ -144,17 +157,17 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         
         toread = [f'{self.data_path}/{data_name}set_pieces/{piece}' for piece in os.listdir(f'{self.data_path}/{data_name}set_pieces')]
         n_lines = sum([line_count(piece) for piece in toread])
-        init_n_lines = math.ceil(n_lines / 10000) * 10000 # 마지막 조각 사이즈가 지정된 청크 사이즈보다 작아져서 나는 에러 방지
+        init_n_lines = math.ceil(n_lines / 128) * 128 # 마지막 조각 사이즈가 지정된 청크 사이즈보다 작아져서 나는 에러 방지
 
         root = zarr.open(f'{self.data_path}/{data_name}set.zarr', mode='w')
-        post = root.zeros('post', shape=(init_n_lines, self.args.max_sentence_len), chunks=(10000, None), dtype='i4')
-        post_length = root.zeros('post_length', shape=(init_n_lines,), chunks=(10000,), dtype='i4') # valid length (without pad)
-        response = root.zeros('response', shape=(init_n_lines, self.args.max_sentence_len), chunks=(10000, None), dtype='i4')
-        response_length = root.zeros('response_length', shape=(init_n_lines,), chunks=(10000,), dtype='i4')
-        post_triple = root.zeros('post_triple', shape=(init_n_lines, self.args.max_sentence_len), chunks=(10000, None), dtype='i4')
-        triple = root.zeros('triple', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len, 3), chunks=(10000, None, None, None), dtype='i4')
-        entity = root.zeros('entity', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len), chunks=(10000, None, None), dtype='i4')
-        response_triple = root.zeros('response_triple', shape=(init_n_lines, self.args.max_sentence_len, 3), chunks=(10000, None, None), dtype='i4')
+        post = root.zeros('post', shape=(init_n_lines, self.args.max_sentence_len), chunks=(128, None), dtype='i4')
+        post_length = root.zeros('post_length', shape=(init_n_lines,), chunks=(128,), dtype='i4') # valid length (without pad)
+        response = root.zeros('response', shape=(init_n_lines, self.args.max_sentence_len), chunks=(128, None), dtype='i4')
+        response_length = root.zeros('response_length', shape=(init_n_lines,), chunks=(128,), dtype='i4')
+        post_triple = root.zeros('post_triple', shape=(init_n_lines, self.args.max_sentence_len), chunks=(128, None), dtype='i4')
+        triple = root.zeros('triple', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len, 3), chunks=(128, None, None, None), dtype='i4')
+        entity = root.zeros('entity', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len), chunks=(128, None, None), dtype='i4')
+        response_triple = root.zeros('response_triple', shape=(init_n_lines, self.args.max_sentence_len, 3), chunks=(128, None, None), dtype='i4')
 
         pool = Pool(min(len(toread), mp.cpu_count()))
         func = functools.partial(process_file, root)
@@ -177,25 +190,17 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
 
     def make_rel_vocab(self):
         # Don't dump; call every time
-        rel2idx = {'_PAD': PAD_IDX, '_NAF': NAF_IDX} # 통일성 위해서 unk 둠
+        rel2idx = {'_PAD': PAD_IDX, '_NAF': NAF_IDX}
         with open(f'{self.data_path}/relation.txt', 'r') as relf:
             rel_dict = {line.strip(): i for i, line in enumerate(relf, start=len(rel2idx))}
             rel2idx.update(rel_dict)
         return rel2idx
 
-    def make_ent_vocab(self):
+    def make_triple_vocab(self):
         raw_dict = open(f'{self.data_path}/resource.txt', 'r').read()
         raw_dict = literal_eval(raw_dict)
-        ent2idx = {k: v+len(DEFAULT_ENT) for k, v in raw_dict['dict_csk_entities'].items()} # 0: _PAD, 1: _NAF; others are mapped to +2
-        default_ent = {k:v for k, v in zip(DEFAULT_ENT, range(len(DEFAULT_ENT)))}
-        ent2idx.update(default_ent)
-
-        # idx mapping, for final word distribution
-        # 1 if entity is not in generic vocab
-        ent2vocab = {v: self.get_word_idx(k) for k, v in ent2idx.items()} 
-        
         idx2triple = {v: k for k, v in raw_dict['dict_csk_triples'].items()}
-        return ent2idx, ent2vocab, idx2triple
+        return idx2triple
 
     def __len__(self):
         return len(self.data['post'])
@@ -205,7 +210,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
 
     def get_word_idx(self, word):
         return self.word2idx.get(word, UNK_IDX)
-    
+
 
 def collate_fn(batch):
     post = torch.tensor([s['post'] for s in batch]) # (bsz, pl)
