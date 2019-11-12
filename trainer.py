@@ -43,17 +43,17 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--log_interval', type=int, default=100)
+    parser.add_argument('--log_interval', type=int, default=1) # 100
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
     parser.add_argument('--hidden', type=int, default=128)
-    parser.add_argument('--n_word_vocab', type=int, default=30000)
+    parser.add_argument('--n_glove_vocab', type=int, default=30000)
     parser.add_argument('--n_entity_vocab', type=int, default=22590)
     parser.add_argument('--gru_layer', type=int, default=2)
     parser.add_argument('--gru_hidden', type=int, default=512)
     parser.add_argument('--max_sentence_len', type=int, default=150)
     parser.add_argument('--max_triple_len', type=int, default=50)
-    parser.add_argument('--init_chunk_size', type=int, default=10000)
+    parser.add_argument('--data_piece_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=41)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--no_cuda', action='store_true')
@@ -62,6 +62,7 @@ if __name__ == '__main__':
 
     device = torch.device(f"cuda:{args.cuda}" if not args.no_cuda and torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
+
     train_loader = dataloader.get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers)
     val_loader = dataloader.get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
     model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel)

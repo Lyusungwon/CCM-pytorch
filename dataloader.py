@@ -16,9 +16,8 @@ import torch
 
 from utils import line_count, pad_1d, pad_2d, append_storage, resize_storage
 
-DEFAULT_VOCAB = ['_PAD', '_UNK', '_SOS', '_EOS', '_NAF']
-# DEFAULT_ENT = ['_PAD', '_NAF']
-PAD_IDX, UNK_IDX, SOS_IDX, EOS_IDX, NAF_IDX = 0, 1, 2, 3, 4
+DEFAULT_VOCAB = ['_PAD', '_NAF', '_UNK', '_SOS', '_EOS']
+PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX = 0, 1, 2, 3, 4
 NAF_TRIPLE = [NAF_IDX, NAF_IDX, NAF_IDX]
 
 
@@ -52,18 +51,19 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         self.idx2rel = {val: key for key, val in self.rel2idx.items()}
 
         if not os.path.isfile(vocab_file):
-            self.entidx2wordidx = self.init_vocab() # only used for init_data
-            self.idx2triple = self.make_triple_vocab()
+            self.init_vocab() # only used for init_data
         else:
             with open(vocab_file, 'rb') as vf:
-                self.word2idx = pickle.load(vf)
-        
-        self.idx2word = OrderedDict([(v, k) for k, v in self.word2idx.items()])
+                d = pickle.load(vf)
+                self.word2idx = d['word2idx']
+                self.entidx2wordidx = d['entidx2wordidx']
 
-        if not os.path.isfile(data_dump):
+        if not os.path.exists(data_dump):
+            self.idx2triple = self.make_triple_vocab()
             self.init_data(data_name)
-        # load
-        self.data = zarr.open(data_dump, mode='r')
+        
+        self.data = zarr.open(data_dump, mode='r') # load zarr dump
+        self.idx2word = OrderedDict([(v, k) for k, v in self.word2idx.items()])
 
 
     def init_vocab(self):
@@ -74,27 +74,27 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         # Then add Glove vocabs (30000)
         with open(f'{self.data_path}/glove.840B.300d.txt', 'r') as glove_f:
             for i, line in enumerate(glove_f):
-                if i >= self.args.n_word_vocab:
+                if i >= self.args.n_glove_vocab:
                     break
                 k = line.split()[0]
                 self.word2idx[k] = len(self.word2idx)
 
         # Now add entity vocab that are not in glove
-        entidx2wordidx = {} # maps entity idx in 'resources.txt' to word idx
+        self.entidx2wordidx = {} # maps entity idx in 'resources.txt' to word idx
         raw_dict = open(f'{self.data_path}/resource.txt', 'r').read()
         raw_dict = literal_eval(raw_dict)
         for ent, idx in raw_dict['dict_csk_entities'].items():
             if ent not in self.word2idx:
                 self.word2idx[ent] = len(self.word2idx)
-            entidx2wordidx[idx] = self.word2idx[ent]
+            self.entidx2wordidx[idx] = self.word2idx[ent]
 
         # Store vocab
         print(f'Vocab size: {len(self.word2idx)}')
+        vocab = {'word2idx': self.word2idx,
+                'entidx2wordidx': self.entidx2wordidx}
         with open(f'{self.data_path}/vocab.pkl', 'wb') as df:
-            pickle.dump(self.word2idx, df)
+            pickle.dump(vocab, df)
         
-        return entidx2wordidx
-
             
     def init_data(self, data_name):
         print(f'Initializing {data_name} data...')
@@ -157,21 +157,21 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         
         toread = [f'{self.data_path}/{data_name}set_pieces/{piece}' for piece in os.listdir(f'{self.data_path}/{data_name}set_pieces')]
         n_lines = sum([line_count(piece) for piece in toread])
-        init_n_lines = math.ceil(n_lines / 128) * 128 # 마지막 조각 사이즈가 지정된 청크 사이즈보다 작아져서 나는 에러 방지
+        init_n_lines = math.ceil(n_lines / 1024) * 1024 # 마지막 조각 사이즈가 지정된 청크 사이즈보다 작아져서 나는 에러 방지
 
         root = zarr.open(f'{self.data_path}/{data_name}set.zarr', mode='w')
-        post = root.zeros('post', shape=(init_n_lines, self.args.max_sentence_len), chunks=(128, None), dtype='i4')
-        post_length = root.zeros('post_length', shape=(init_n_lines,), chunks=(128,), dtype='i4') # valid length (without pad)
-        response = root.zeros('response', shape=(init_n_lines, self.args.max_sentence_len), chunks=(128, None), dtype='i4')
-        response_length = root.zeros('response_length', shape=(init_n_lines,), chunks=(128,), dtype='i4')
-        post_triple = root.zeros('post_triple', shape=(init_n_lines, self.args.max_sentence_len), chunks=(128, None), dtype='i4')
-        triple = root.zeros('triple', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len, 3), chunks=(128, None, None, None), dtype='i4')
-        entity = root.zeros('entity', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len), chunks=(128, None, None), dtype='i4')
-        response_triple = root.zeros('response_triple', shape=(init_n_lines, self.args.max_sentence_len, 3), chunks=(128, None, None), dtype='i4')
+        post = root.zeros('post', shape=(init_n_lines, self.args.max_sentence_len), chunks=(1024, None), dtype='i4')
+        post_length = root.zeros('post_length', shape=(init_n_lines,), chunks=(1024,), dtype='i4') # valid length (without pad)
+        response = root.zeros('response', shape=(init_n_lines, self.args.max_sentence_len), chunks=(1024, None), dtype='i4')
+        response_length = root.zeros('response_length', shape=(init_n_lines,), chunks=(1024,), dtype='i4')
+        post_triple = root.zeros('post_triple', shape=(init_n_lines, self.args.max_sentence_len), chunks=(1024, None), dtype='i4')
+        triple = root.zeros('triple', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len, 3), chunks=(1024, None, None, None), dtype='i4')
+        entity = root.zeros('entity', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len), chunks=(1024, None, None), dtype='i4')
+        response_triple = root.zeros('response_triple', shape=(init_n_lines, self.args.max_sentence_len, 3), chunks=(1024, None, None), dtype='i4')
 
         pool = Pool(min(len(toread), mp.cpu_count()))
         func = functools.partial(process_file, root)
-        iterinp = [(i*self.args.init_chunk_size, filename) for i, filename in enumerate(toread)]
+        iterinp = [(i*self.args.data_piece_size, filename) for i, filename in enumerate(toread)]
         max_post_lens, max_response_lens, max_triple_lens = zip(*tqdm(pool.imap(func, iterinp), total=len(iterinp)))
         
         max_post_len, max_response_len, max_triple_len = max(max_post_lens), max(max_response_lens), max(max_triple_lens)
@@ -209,7 +209,10 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         return {k: v[i] for k, v in self.data.arrays()}
 
     def get_word_idx(self, word):
-        return self.word2idx.get(word, UNK_IDX)
+        res = self.word2idx.get(word, UNK_IDX)
+        if res >= self.args.n_glove_vocab + len(DEFAULT_VOCAB):
+            res = UNK_IDX
+        return res
 
 
 def collate_fn(batch):

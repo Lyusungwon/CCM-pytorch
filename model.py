@@ -30,17 +30,17 @@ def get_pretrained_glove(path, n_word=30000):
         weights = torch.cat(default + weights, dim=0)
         torch.save(weights, saved_glove)
         print(f"Glove saved in {saved_glove}")
-
     return torch.load(saved_glove)
 
 
 def get_pretrained(label_path, weight_path, idx2word, dim=100):
     saved_weight = weight_path.replace('.txt', '.pt')
-    def make_weights():
+    if not os.path.isfile(saved_weight):
         labels = [label for label in open(label_path, 'r').read().split('\n') if label]
         entity = pd.read_csv(weight_path, sep="\t", header=None, quoting=csv.QUOTE_NONE)
         entity.index = labels
         n = 0
+        
         def get_vec(w):
             nonlocal n
             try:
@@ -48,15 +48,13 @@ def get_pretrained(label_path, weight_path, idx2word, dim=100):
             except KeyError:
                 # print(w)
                 n += 1
-                return np.rand(dim).astype('float32')
+                return np.random.rand(dim).astype('float32')
 
         weights = [torch.from_numpy(get_vec(w)).unsqueeze(0) for i, w in idx2word.items()]
         print(n, len(idx2word))
         weights = torch.cat(weights, dim=0)
         torch.save(weights, saved_weight)
         print(f"Weights saved in {saved_weight}")
-    if not os.path.isfile(saved_weight):
-        make_weights()
     return torch.load(saved_weight)
 
 
@@ -75,11 +73,12 @@ class CCMModel(nn.Module):
         self.args = args
         self.idx2word = idx2word # glove + entities
         self.idx2rel = idx2rel
-        self.n_word_vocab = args.n_word_vocab
+        self.n_glove_vocab = args.n_glove_vocab + len(DEFAULT_VOCAB) # glove only
+        self.n_out_vocab = len(idx2word)
         self.gru_layer = args.gru_layer
 
         self.word_embedding = nn.Embedding.from_pretrained(
-            get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_word_vocab),
+            get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_glove_vocab),
             freeze=False, padding_idx=0) # specials: pad, unk, naf_h/t
 
         self.entity_embedding = nn.Embedding.from_pretrained(
@@ -101,10 +100,10 @@ class CCMModel(nn.Module):
         self.Vb = nn.Linear(args.hidden, 1)
         self.Wc = nn.Linear(args.gru_hidden * args.gru_layer, 3 * args.t_embed)
 
-        # self.Vo = nn.Linear(3 * args.gru_hidden + 5 * args.t_embed, 1)
-        # self.Wo = nn.Linear(3 * args.gru_hidden + 5 * args.t_embed, args.n_word_vocab)
+        self.Vo = nn.Linear(3 * args.gru_hidden + 5 * args.t_embed, 1)
+        self.Wo = nn.Linear(3 * args.gru_hidden + 5 * args.t_embed, self.n_glove_vocab)
 
-        self.out = nn.Linear(args.gru_hidden, args.n_word_vocab + len(DEFAULT_VOCAB))
+        # self.out = nn.Linear(args.gru_hidden, self.n_glove_vocab)
 
     def forward(self, batch):
         post = batch['post']
@@ -154,7 +153,7 @@ class CCMModel(nn.Module):
 
         # Decoder
         response_input = torch.cat([response_emb, res_triple_emb], -1)  # (bsz, rl, d_embed + 3 * t_embed)
-        dec_logits = torch.zeros(rl - 1, bsz, self.n_word_vocab).to(device)
+        dec_logits = torch.zeros(rl - 1, bsz, self.n_out_vocab).to(device)
 
         for t in range(rl - 1):
             response_vector = response_input[:, t]  # (bsz, d_embed + 3 * t_embed)
@@ -182,27 +181,25 @@ class CCMModel(nn.Module):
             dec_input = torch.cat([context_vector, dynamic_graph, triple_vector, response_vector], 1).unsqueeze(-2) # (bsz, gru_hidden + 8 * t_embed + d_embed)
             gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden)  # (bsz, 1, gru_hidden) / (2*gru_hidden, bsz) # NOTE: 2-layer..
             gru_state = gru_hidden.transpose(0, 1).reshape(bsz, 1, -1)
-            # gru_state = gru_hidden.transpose(0, 1)
 
-            # final_dist_input = torch.cat([gru_state, context_vector, dynamic_graph, triple_vector], dim=-1) # (bsz, 3*gru_hidden + 5*t_embed)
-            # generic_dist = F.softmax(self.Wo(final_dist_input)) # (bsz, n_vocab)
-            # entity_dist = dynamic_attn.unsqueeze(-1) * triple_attn # (bsz, pl, tl)
-            # scattered_entity_dist = torch.zeros(bsz, )
+            final_dist_input = torch.cat([gru_state.squeeze(1), context_vector, dynamic_graph, triple_vector], dim=-1) # (bsz, 3*gru_hidden + 5*t_embed)
+            generic_dist = F.softmax(self.Wo(final_dist_input), -1) # (bsz, n_vocab)
+            entity_dist = dynamic_attn.unsqueeze(-1) * triple_attn # (bsz, pl, tl)
             
-            # # TODO: extend vocab에 scatter
-            # gate = F.sigmoid(self.Vo(final_dist_input))
-            
+            gate = torch.sigmoid(self.Vo(final_dist_input))
+            dists = torch.cat([(1 - gate) * generic_dist, gate * entity_dist.view(bsz, -1)], -1) 
+            indices = torch.cat([
+              torch.arange(self.n_glove_vocab).repeat(bsz, 1).to(entity),
+              entity.view(bsz, -1)
+              ], -1)
+            final_dist = scatter_add(dists, indices.long()) # needs to be padded
 
-            # dists = torch.cat([(1 - gate) * generic_dist, gate * entity_dist.view(bsz, -1)], -1) 
-            # indices = torch.cat([
-            #   torch.arange(args.n_word + len(DEFAULT_VOCAB)),
-            #   entity.view(bsz, -1)
-            #   ], -1)
-            # final_dist = scatter_add(dists, indices)
+            valid_words = final_dist.size(1)
+            final_dist = torch.cat([final_dist, torch.zeros(bsz, self.n_out_vocab - valid_words).to(final_dist)], -1)
+            dec_logits[t] = final_dist.unsqueeze(0)
 
-
-            logit = self.out(gru_out)  # (bsz, 1, n_vocab)
-            dec_logits[t] = logit.transpose(0, 1)
+            # logit = self.out(gru_out)  # (bsz, 1, n_vocab)
+            # dec_logits[t] = logit.transpose(0, 1)
 
         return dec_logits.permute(1, 2, 0)
 
@@ -213,7 +210,7 @@ if __name__ == "__main__":
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
     parser.add_argument('--hidden', type=int, default=128)
-    parser.add_argument('--n_word_vocab', type=int, default=30000)
+    parser.add_argument('--n_glove_vocab', type=int, default=30000)
     parser.add_argument('--n_entity_vocab', type=int, default=22590)
     parser.add_argument('--gru_layer', type=int, default=2)
     parser.add_argument('--gru_hidden', type=int, default=512)
@@ -227,7 +224,7 @@ if __name__ == "__main__":
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
-    args.n_word_vocab += 4
+    args.n_glove_vocab += 4
 
     from dataloader import get_dataloader
     dataloader = get_dataloader(args=args, batch_size=args.batch_size, shuffle=False)
