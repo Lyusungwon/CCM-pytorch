@@ -134,8 +134,8 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
 
                     post[i, :pl] = [SOS_IDX] + [self.get_word_idx(p) for p in line['post']] + [EOS_IDX]
                     response[i, :rl] = [SOS_IDX] + [self.get_word_idx(r) for r in line['response']] + [EOS_IDX]
-                    post_triple[i, 1:pl-1] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
-                    response_triple[i, 1:rl-1] = [transform_triple_to_hrt(rt) for rt in line['response_triples']]
+                    post_triple[i, 1:-1] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
+                    response_triple[i, 1:-1] = [transform_triple_to_hrt(rt) for rt in line['response_triples']]
                     
                     # put NAF_TRIPLE/entity at index 0
                     triple[i] = pad_2d([[NAF_TRIPLE]] + [[transform_triple_to_hrt(t) for t in triples] for triples in line['all_triples']], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
@@ -225,6 +225,11 @@ def collate_fn(batch):
     entity = torch.tensor([s['entity'] for s in batch]) # (bsz, pl, tl)
     response_triple = torch.tensor([s['response_triple'] for s in batch]) # (bsz, rl, 3)
 
+    # HACK to resolve NaN issue (data that are all 0)
+    is_nonzero = np.where(triple.view(triple.size(0), -1).sum(-1))
+    post, post_length, response, response_length, post_triple, triple, entity, response_triple = \
+        post[is_nonzero], post_length[is_nonzero], response[is_nonzero], response_length[is_nonzero], post_triple[is_nonzero], triple[is_nonzero], entity[is_nonzero], response_triple[is_nonzero]
+
     # Sort in descending length order
     perm_idx = torch.sort(post_length, descending=True)[1].long()
     post, post_length, response, response_length, post_triple, triple, entity, response_triple = \
@@ -252,15 +257,11 @@ def collate_fn(batch):
         'response_triple': response_triple.long(),
     }
 
-    # def padding(sent, length):
-    #     """ Add sos and eos tokens, then pad sentence to length"""
-    #     return ['_SOS'] + sent + ['_EOS'] + (['_PAD'] * (length - len(sent) - 2))
-
     return batched_data
 
 
 if __name__ == "__main__":
-    args = {'max_sentence_len': 150, 'max_triple_len': 50, 'init_chunk_size': 10000}
+    args = {'max_sentence_len': 150, 'max_triple_len': 50, 'data_piece_size': 10000}
     class Args(object):
         def __init__(self, adict):
             self.__dict__.update(adict)

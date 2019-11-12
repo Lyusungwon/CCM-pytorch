@@ -43,7 +43,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--log_interval', type=int, default=1) # 100
+    parser.add_argument('--log_interval', type=int, default=100)
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
     parser.add_argument('--hidden', type=int, default=128)
@@ -55,7 +55,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_triple_len', type=int, default=50)
     parser.add_argument('--data_piece_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=41)
-    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--num_workers', type=int, default=12)
     parser.add_argument('--no_cuda', action='store_true')
     parser.add_argument('--cuda', type=int, default=0)
     args = parser.parse_args()
