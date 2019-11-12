@@ -200,7 +200,7 @@ class CCMModel(nn.Module):
 
             # if torch.isnan(dec_logits[t]).any():
             #     ipdb.set_trace()
-            
+
             # logit = self.out(gru_out)  # (bsz, 1, n_vocab)
             # dec_logits[t] = logit.transpose(0, 1)
 

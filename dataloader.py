@@ -1,7 +1,7 @@
 import os
 import math
 from ast import literal_eval
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import functools
 import pickle
 import hashlib
@@ -64,7 +64,9 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         
         self.data = zarr.open(data_dump, mode='r') # load zarr dump
         self.idx2word = OrderedDict([(v, k) for k, v in self.word2idx.items()])
+        self.triple_dict = self.make_triple_dict()
 
+        import ipdb; ipdb.set_trace()
 
     def init_vocab(self):
         # First add DEFAULT_VOCAB
@@ -201,6 +203,19 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         raw_dict = literal_eval(raw_dict)
         idx2triple = {v: k for k, v in raw_dict['dict_csk_triples'].items()}
         return idx2triple
+
+    def make_triple_dict(self):
+        raw_dict = open(f'{self.data_path}/resource.txt', 'r').read()
+        raw_dict = literal_eval(raw_dict)
+        triple_dict = defaultdict(lambda: [NAF_TRIPLE])
+        for k, triples in raw_dict['dict_csk'].items():
+            tmp = []
+            for tr in triples:
+                h, r, t = tr.split(", ")
+                tmp.append([self.word2idx[h], self.rel2idx[r], self.word2idx[t]])
+            triple_dict[self.word2idx[k]] = tmp
+        return triple_dict
+
 
     def __len__(self):
         return len(self.data['post'])
