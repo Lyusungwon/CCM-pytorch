@@ -47,7 +47,7 @@ if __name__ == '__main__':
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
     parser.add_argument('--hidden', type=int, default=128)
-    parser.add_argument('--n_word_vocab', type=int, default=30000)
+    parser.add_argument('--n_word_vocab', type=int, default=30004)
     parser.add_argument('--n_entity_vocab', type=int, default=22590)
     parser.add_argument('--gru_layer', type=int, default=2)
     parser.add_argument('--gru_hidden', type=int, default=512)
