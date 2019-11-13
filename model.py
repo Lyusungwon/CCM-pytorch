@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 from torch_scatter import scatter_add
 
-from dataloader import DEFAULT_VOCAB
+from dataloader import DEFAULT_VOCAB, PAD_IDX
 import ipdb
 
 
@@ -60,10 +60,10 @@ def get_pretrained(label_path, weight_path, idx2word, dim=100):
 
 def get_pad_mask(lengths, max_length):
     """ 1 for pad """
-    bsz = lengths.size()[0]
+    bsz = lengths.size(0)
     mask = torch.zeros((bsz, max_length), dtype=torch.bool)
     for j in range(bsz):
-        mask[j, lengths[j]+1:] = 1
+        mask[j, lengths[j]:] = 1
     return mask
 
 
@@ -79,15 +79,15 @@ class CCMModel(nn.Module):
 
         self.word_embedding = nn.Embedding.from_pretrained(
             get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_glove_vocab),
-            freeze=False, padding_idx=0) # specials: pad, unk, naf_h/t
+            freeze=False, padding_idx=PAD_IDX) # specials: pad, unk, naf_h/t
 
         self.entity_embedding = nn.Embedding.from_pretrained(
             get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=idx2word),
-            freeze=False, padding_idx=0)
+            freeze=False, padding_idx=PAD_IDX)
 
         self.rel_embedding = nn.Embedding.from_pretrained(
             get_pretrained(label_path=f'{args.data_dir}/relation.txt', weight_path=f'{args.data_dir}/relation_transE.txt', idx2word=idx2rel),
-            freeze=False, padding_idx=0)
+            freeze=False, padding_idx=PAD_IDX)
 
         self.Wh = nn.Linear(args.t_embed, args.hidden)
         self.Wr = nn.Linear(args.t_embed, args.hidden)
@@ -107,13 +107,13 @@ class CCMModel(nn.Module):
 
     def forward(self, batch):
         post = batch['post']
-        post_mask = post.eq(0)
+        post_mask = post.eq(PAD_IDX)
         post_length = batch['post_length']
         response = batch['response']
         response_length = batch['response_length']
         post_triple = batch['post_triple']
         triple = batch['triple']
-        triple_mask = triple.eq(0)
+        triple_mask = triple.eq(PAD_IDX)
         entity = batch['entity']
         response_triple = batch['response_triple']
         device = post.device
@@ -135,12 +135,12 @@ class CCMModel(nn.Module):
 
         # Static Graph
         ent = torch.cat([head_emb, tail_emb], -1)  # (bsz, pl, tl, 2 * t_embed)
-        mask = get_pad_mask(post_triple.max(1)[0], ent.size(1)).to(device)
+        mask = get_pad_mask(post_triple.max(-1)[0], ent.size(1)).to(device)
         ent.data.masked_fill_(mask.view(*mask.size(), 1, 1), 0)
         static_logit = (self.Wr(rel_emb) * torch.tanh(self.Wh(head_emb) + self.Wt(tail_emb))).sum(-1, keepdim=False)  # (bsz, pl, tl)
-        static_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf'))
+        static_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf')) # pad 부분 가림
         static_logit.data.masked_fill_(mask.unsqueeze(-1), 0)
-        static_attn = F.softmax(static_logit, dim=-1)  # (bsz, pl, tl)
+        static_attn = F.softmax(static_logit, dim=-1)  # (bsz, pl, tl) # TODO: NAN
         static_graph = (ent * static_attn.unsqueeze(-1)).sum(-2)  # (bsz, pl, 2 * t_embed) / gi
         post_triples = static_graph.gather(1, post_triple.unsqueeze(-1).expand_as(static_graph))
         post_input = torch.cat([post_emb, post_triples], -1)  # (bsz, pl, d_emb + 2 * t_embed)
@@ -197,6 +197,9 @@ class CCMModel(nn.Module):
             valid_words = final_dist.size(1)
             final_dist = torch.cat([final_dist, torch.zeros(bsz, self.n_out_vocab - valid_words).to(final_dist)], -1)
             dec_logits[t] = final_dist.unsqueeze(0)
+
+            # if torch.isnan(dec_logits[t]).any():
+            #     ipdb.set_trace()
 
             # logit = self.out(gru_out)  # (bsz, 1, n_vocab)
             # dec_logits[t] = logit.transpose(0, 1)

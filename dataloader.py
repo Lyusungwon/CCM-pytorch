@@ -1,7 +1,7 @@
 import os
 import math
 from ast import literal_eval
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 import functools
 import pickle
 import hashlib
@@ -64,7 +64,9 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         
         self.data = zarr.open(data_dump, mode='r') # load zarr dump
         self.idx2word = OrderedDict([(v, k) for k, v in self.word2idx.items()])
+        self.triple_dict = self.make_triple_dict()
 
+        import ipdb; ipdb.set_trace()
 
     def init_vocab(self):
         # First add DEFAULT_VOCAB
@@ -134,8 +136,8 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
 
                     post[i, :pl] = [SOS_IDX] + [self.get_word_idx(p) for p in line['post']] + [EOS_IDX]
                     response[i, :rl] = [SOS_IDX] + [self.get_word_idx(r) for r in line['response']] + [EOS_IDX]
-                    post_triple[i, 1:pl-1] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
-                    response_triple[i, 1:rl-1] = [transform_triple_to_hrt(rt) for rt in line['response_triples']]
+                    post_triple[i, 1:-1] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
+                    response_triple[i, 1:-1] = [transform_triple_to_hrt(rt) for rt in line['response_triples']]
                     
                     # put NAF_TRIPLE/entity at index 0
                     triple[i] = pad_2d([[NAF_TRIPLE]] + [[transform_triple_to_hrt(t) for t in triples] for triples in line['all_triples']], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
@@ -202,6 +204,19 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         idx2triple = {v: k for k, v in raw_dict['dict_csk_triples'].items()}
         return idx2triple
 
+    def make_triple_dict(self):
+        raw_dict = open(f'{self.data_path}/resource.txt', 'r').read()
+        raw_dict = literal_eval(raw_dict)
+        triple_dict = defaultdict(lambda: [NAF_TRIPLE])
+        for k, triples in raw_dict['dict_csk'].items():
+            tmp = []
+            for tr in triples:
+                h, r, t = tr.split(", ")
+                tmp.append([self.word2idx[h], self.rel2idx[r], self.word2idx[t]])
+            triple_dict[self.word2idx[k]] = tmp
+        return triple_dict
+
+
     def __len__(self):
         return len(self.data['post'])
 
@@ -224,6 +239,11 @@ def collate_fn(batch):
     triple = torch.tensor([s['triple'] for s in batch]) # (bsz, pl, tl, 3) # NOTE: 원래는 pl보다 작지만 (valid-pl-with-triple이므로) 그냥 똑같이 pl로 둠
     entity = torch.tensor([s['entity'] for s in batch]) # (bsz, pl, tl)
     response_triple = torch.tensor([s['response_triple'] for s in batch]) # (bsz, rl, 3)
+
+    # HACK to resolve NaN issue (data that are all 0)
+    is_nonzero = np.where(triple.view(triple.size(0), -1).sum(-1))
+    post, post_length, response, response_length, post_triple, triple, entity, response_triple = \
+        post[is_nonzero], post_length[is_nonzero], response[is_nonzero], response_length[is_nonzero], post_triple[is_nonzero], triple[is_nonzero], entity[is_nonzero], response_triple[is_nonzero]
 
     # Sort in descending length order
     perm_idx = torch.sort(post_length, descending=True)[1].long()
@@ -252,15 +272,11 @@ def collate_fn(batch):
         'response_triple': response_triple.long(),
     }
 
-    # def padding(sent, length):
-    #     """ Add sos and eos tokens, then pad sentence to length"""
-    #     return ['_SOS'] + sent + ['_EOS'] + (['_PAD'] * (length - len(sent) - 2))
-
     return batched_data
 
 
 if __name__ == "__main__":
-    args = {'max_sentence_len': 150, 'max_triple_len': 50, 'init_chunk_size': 10000}
+    args = {'max_sentence_len': 150, 'max_triple_len': 50, 'data_piece_size': 10000}
     class Args(object):
         def __init__(self, adict):
             self.__dict__.update(adict)
