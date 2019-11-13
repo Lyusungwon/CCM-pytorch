@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 from torch_scatter import scatter_add
 
-from dataloader import DEFAULT_VOCAB, PAD_IDX, NAF_IDX, SOS_IDX, EOS_IDX
+from dataloader import DEFAULT_VOCAB, PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX
 import ipdb
 
 
@@ -20,7 +20,7 @@ def get_pretrained_glove(path, n_word=30000):
     saved_glove = path.replace('.txt', '.pt')
     if not os.path.isfile(saved_glove):
         print('Reading pretrained glove...')
-        words = pd.read_csv(path, sep=" ", index_col=0, header=None, quoting=csv.QUOTE_NONE, nrows=n_word-len(DEFAULT_VOCAB))
+        words = pd.read_csv(path, sep=" ", index_col=0, header=None, quoting=csv.QUOTE_NONE, nrows=n_word)
         # def get_vec(w):
         #     return words.loc[w].values.astype('float32')
         # weights = [torch.from_numpy(get_vec(w)).unsqueeze(0) for i, w in enumerate(DEFAULT_VOCAB)]
@@ -83,6 +83,7 @@ class CCMModel(nn.Module):
         self.word_embedding = nn.Embedding.from_pretrained(
             get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_glove_vocab),
             freeze=False, padding_idx=PAD_IDX) # specials: pad, unk, naf_h/t
+        print(self.word_embedding)
 
         self.entity_embedding = nn.Embedding.from_pretrained(
             get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=idx2word),
@@ -127,6 +128,7 @@ class CCMModel(nn.Module):
         triple_emb = torch.cat([head_emb, rel_emb, tail_emb], 3)  # (bsz, pl, tl, 3 * t_embed)
 
         response = batch['response']
+        response[response >= self.n_glove_vocab] = UNK_IDX
         rl = response.size()[1]
         response_triple = batch['response_triple']
         if not self.training:
@@ -214,6 +216,7 @@ class CCMModel(nn.Module):
                 response_vector = response_input[:, t + 1] # ground truth
             else:
                 top1 = final_dist.max(-1)[1]  # (bsz, )
+                top1[top1 >= self.n_glove_vocab] = UNK_IDX
                 finished_index[top1 == EOS_IDX] = 1
                 response_emb = self.word_embedding(top1)  # (bsz, d_embed)
                 response_vector = torch.cat([response_emb, res_triple_emb[:, 0]], -1)  # (bsz, d_embed + 3 * t_embed)
