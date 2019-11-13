@@ -14,10 +14,17 @@ def epoch(epoch_idx, is_train):
     loader = train_loader if is_train else val_loader
     recorder.epoch_start(epoch_idx, is_train, loader)
     for batch_idx, batch in enumerate(loader):
-        batch_size = batch['response'].size()[0]
+        batch_size, rl = batch['response'].size()
         batch = {key: val.to(device) for key, val in batch.items()}
         optimizer.zero_grad()
-        output = model(batch)
+        output, pointer_prob = model(batch)
+        output_len = output.size()[2]
+        if output_len > rl-1:
+            output = output[:, :, :rl]
+        elif output_len < rl-1:
+            pad = torch.zeros((batch_size, output.size()[1], rl), device=device)
+            pad[:, :, :output_len+1] = output
+            output = pad
         loss = criterion(output, batch['response'][:, 1:])
         if is_train:
             loss.backward()
@@ -44,15 +51,17 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--log_interval', type=int, default=100)
+    parser.add_argument('--teacher_forcing', type=float, default=0.5)
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
     parser.add_argument('--hidden', type=int, default=128)
-    parser.add_argument('--n_glove_vocab', type=int, default=30004)
+    parser.add_argument('--n_glove_vocab', type=int, default=30000)
     parser.add_argument('--n_entity_vocab', type=int, default=22590)
     parser.add_argument('--gru_layer', type=int, default=2)
     parser.add_argument('--gru_hidden', type=int, default=512)
     parser.add_argument('--max_sentence_len', type=int, default=150)
     parser.add_argument('--max_triple_len', type=int, default=50)
+    parser.add_argument('--max_response_len', type=int, default=150)
     parser.add_argument('--data_piece_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=41)
     parser.add_argument('--num_workers', type=int, default=12)
