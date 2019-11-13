@@ -1,12 +1,18 @@
 import argparse
-import dataloader
-from model import CCMModel
+import datetime
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
-import datetime
 from tensorboardX import SummaryWriter
+
+from dataloader import get_dataloader, PAD_IDX, NAF_IDX
+from model import CCMModel
 from recorder import Recorder
+from criterion import criterion, perplexity
+
+import ipdb
 
 
 def epoch(epoch_idx, is_train):
@@ -14,18 +20,20 @@ def epoch(epoch_idx, is_train):
     loader = train_loader if is_train else val_loader
     recorder.epoch_start(epoch_idx, is_train, loader)
     for batch_idx, batch in enumerate(loader):
-        batch_size = batch['response'].size()[0]
+        batch_size = batch['response'].size(0)
         batch = {key: val.to(device) for key, val in batch.items()}
         optimizer.zero_grad()
-        output = model(batch)
-        loss = criterion(output, batch['response'][:, 1:])
+        output, pointer_prob = model(batch)
+        pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1).to(pointer_prob)
+        pointer_prob_target.data.masked_fill_(batch['response'] == 0, PAD_IDX)
+        loss, nll_loss = criterion(output, pointer_prob, batch['response'][:, 1:], pointer_prob_target[:, 1:])
+        pp = perplexity(nll_loss)
         if is_train:
             loss.backward()
             optimizer.step()
         recorder.batch_end(batch_idx, batch_size, loss.item())
     recorder.log_text(output, batch)
     recorder.epoch_end()
-
 
 
 def train():
@@ -63,12 +71,11 @@ if __name__ == '__main__':
     device = torch.device(f"cuda:{args.cuda}" if not args.no_cuda and torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
 
-    train_loader = dataloader.get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers)
-    val_loader = dataloader.get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
+    train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers)
+    val_loader = get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
     model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel)
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), args.lr)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
     writer = SummaryWriter(f'{args.log_dir}/{args.project}_{args.timestamp}')
     recorder = Recorder(args, writer, train_loader.dataset.idx2word)
 
