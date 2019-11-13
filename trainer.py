@@ -26,11 +26,15 @@ def epoch(epoch_idx, is_train):
         output, pointer_prob = model(batch)
         output_len = output.size()[2]
         if output_len > rl-1:
-            output = output[:, :, :rl]
+            output = output[:, :, :rl-1]
+            pointer_prob = pointer_prob[:, :rl-1]
         elif output_len < rl-1:
-            pad = torch.zeros((batch_size, output.size()[1], rl), device=device)
+            pad = torch.zeros((batch_size, output.size()[1], rl-1), device=device)
             pad[:, :, :output_len+1] = output
             output = pad
+            pad = torch.zeros((batch_size, rl - 1), device=device)
+            pad[:, :output_len + 1] = pointer_prob
+            pointer_prob = pad
         pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1).to(pointer_prob)
         pointer_prob_target.data.masked_fill_(batch['response'] == 0, PAD_IDX)
         loss, nll_loss = criterion(output, pointer_prob, batch['response'][:, 1:], pointer_prob_target[:, 1:])
@@ -38,7 +42,7 @@ def epoch(epoch_idx, is_train):
         if is_train:
             loss.backward()
             optimizer.step()
-        recorder.batch_end(batch_idx, batch_size, loss.item())
+        recorder.batch_end(batch_idx, batch_size, loss.item(), pp.item())
     recorder.log_text(output, batch)
     recorder.epoch_end()
 

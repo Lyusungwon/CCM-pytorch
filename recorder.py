@@ -1,5 +1,6 @@
 import time
 import torch
+from dataloader import UNK_IDX, SOS_IDX, EOS_IDX, PAD_IDX
 
 
 class Recorder:
@@ -16,13 +17,16 @@ class Recorder:
         self.batch_num = len(loader)
         self.dataset_size = len(loader.dataset)
         self.epoch_loss = 0
+        self.epoch_pp = 0
         self.epoch_start_time = time.time()
         self.batch_start_time = time.time()
 
-    def batch_end(self, batch_idx, batch_size, loss):
+    def batch_end(self, batch_idx, batch_size, loss, pp):
         self.batch_end_time = time.time()
         self.batch_loss = loss
+        self.batch_pp = pp
         self.epoch_loss += self.batch_loss * batch_size
+        self.epoch_pp += self.batch_pp * batch_size
         self.batch_time = self.batch_end_time - self.batch_start_time
         self.batch_start_time = time.time()
         if self.mode == 'Train' and batch_idx % self.log_interval == 0:
@@ -33,7 +37,8 @@ class Recorder:
                 self.batch_loss,
                 self.batch_time))
             batch_record_idx = (self.epoch_idx - 1) * (self.batch_num//self.log_interval) + batch_idx // self.log_interval
-            self.writer.add_scalar(f'{self.mode}-Batch loss', self.batch_loss, batch_record_idx)
+            self.writer.add_scalar(f'{self.mode}-Batch loss', self.batch_pp, batch_record_idx)
+            self.writer.add_scalar(f'{self.mode}-Batch perplexity', self.batch_loss, batch_record_idx)
             self.writer.add_scalar(f'{self.mode}-Batch time', self.batch_time, batch_record_idx)
 
     def epoch_end(self):
@@ -45,10 +50,13 @@ class Recorder:
             self.epoch_loss / self.dataset_size,
             self.epoch_time))
         self.writer.add_scalar(f'{self.mode}-Epoch loss', self.epoch_loss / self.dataset_size, self.epoch_idx)
+        self.writer.add_scalar(f'{self.mode}-Epoch perplexity', self.epoch_pp / self.dataset_size, self.epoch_idx)
         self.writer.add_scalar(f'{self.mode}-Epoch time', self.epoch_time, self.epoch_idx)
 
     def log_text(self, output, batch):
         if self.mode == 'Val':
+            print('===== SAMPLE =====')
+            print()
             n = min(batch['response'].size()[0], 8)
             output = output[:n]
             text_idx = list()
@@ -58,16 +66,21 @@ class Recorder:
             text_all = list()
             for n, lines in enumerate(zip(*text_idx)):
                 texts = [f'{n + 1}']
+                print(n+1)
                 for name, line in zip(['post', 'response', 'response_output'], lines):
                     texts.append(name)
+                    print(f'    {name}')
                     line_text = []
                     for idx in line:
                         idx = idx.item()
-                        if idx > 2:
-                            line_text.append(self.idx2word[idx])
-                            if idx == 3:
-                                break
-                    texts.append(' '.join(line_text))
+                        if idx == EOS_IDX:
+                            break
+                        if idx != SOS_IDX and idx != PAD_IDX:
+                            line_text.append(self.idx2word.get(idx, 'UNK'))
+                    sentence = ' '.join(line_text)
+                    texts.append(sentence)
+                    print(f'        {sentence}')
                 text_all.append(' - '.join(texts))
+            print('==================')
             self.writer.add_text('Samples', ' / '.join(text_all), self.epoch_idx)
 

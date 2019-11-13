@@ -83,7 +83,6 @@ class CCMModel(nn.Module):
         self.word_embedding = nn.Embedding.from_pretrained(
             get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_glove_vocab),
             freeze=False, padding_idx=PAD_IDX) # specials: pad, unk, naf_h/t
-        print(self.word_embedding)
 
         self.entity_embedding = nn.Embedding.from_pretrained(
             get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=idx2word),
