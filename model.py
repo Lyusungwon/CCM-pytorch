@@ -224,7 +224,7 @@ class CCMModel(nn.Module):
 
         dec_logits = torch.cat(dec_logits, 0).permute(1, 2, 0)
         pointer_prob = torch.cat(pointer_prob, -1)
-        return dec_logits, pointer_prob
+        return dec_logits, pointer_prob # (bsz, rl-1, n_out), (bsz, rl-1)
 
 
 if __name__ == "__main__":

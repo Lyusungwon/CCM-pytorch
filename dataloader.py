@@ -98,6 +98,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
             
     def init_data(self, data_name, n_chunk=1024):
         print(f'Initializing {data_name} data...')
+
         def transform_triple_to_hrt(triple_idx):
             """ Transforms triple-idx (as a whole) to h/r/t format """
             if triple_idx == -1: # for response_triple
@@ -136,12 +137,10 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                     response[i, :rl] = [SOS_IDX] + [self.get_word_idx(r) for r in line['response']] + [EOS_IDX]
                     post_triple[i, 1:pl-1] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
                     response_triple[i, :rl] = [[1, 1, 1]] + [transform_triple_to_hrt(rt) for rt in line['response_triples']] + [[1, 1, 1]]
-                    # response_triple[i, 1:rl-1] = [transform_triple_to_hrt(rt) for rt in line['response_triples']]
 
                     # put NAF_TRIPLE/entity at index 0
                     triple[i] = pad_2d([[NAF_TRIPLE]] + [[transform_triple_to_hrt(t) for t in triples] for triples in line['all_triples']], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
                     entity[i] = pad_2d([[NAF_IDX]] + [[self.entidx2wordidx[e] for e in entities] for entities in line['all_entities']], length=(self.args.max_sentence_len, self.args.max_triple_len))
-
 
                 # dump to zarr
                 root['post'][start_i : start_i+n_sample] = post
@@ -192,8 +191,8 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
     def make_rel_vocab(self):
         # Don't dump; call every time
         rel2idx = {'_PAD': PAD_IDX, '_NAF': NAF_IDX}
-        with open(f'{self.data_path}/relation.txt', 'r') as relf:
-            rel_dict = {line.strip(): i for i, line in enumerate(relf, start=len(rel2idx))}
+        with open(f'{self.data_path}/relation.txt', 'r') as rel_f:
+            rel_dict = {line.strip(): i for i, line in enumerate(rel_f, start=len(rel2idx))}
             rel2idx.update(rel_dict)
         return rel2idx
 
