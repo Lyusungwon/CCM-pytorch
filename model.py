@@ -154,6 +154,7 @@ class CCMModel(nn.Module):
         # Decoder
         response_input = torch.cat([response_emb, res_triple_emb], -1)  # (bsz, rl, d_embed + 3 * t_embed)
         dec_logits = torch.zeros(rl - 1, bsz, self.n_out_vocab).to(device)
+        pointer_probs = torch.zeros(bsz, rl-1).to(device)
 
         for t in range(rl - 1):
             response_vector = response_input[:, t]  # (bsz, d_embed + 3 * t_embed)
@@ -185,9 +186,8 @@ class CCMModel(nn.Module):
             final_dist_input = torch.cat([gru_state.squeeze(1), context_vector, dynamic_graph, triple_vector], dim=-1) # (bsz, 3*gru_hidden + 5*t_embed)
             generic_dist = F.softmax(self.Wo(final_dist_input), -1) # (bsz, n_vocab)
             entity_dist = dynamic_attn.unsqueeze(-1) * triple_attn # (bsz, pl, tl)
-            
-            gate = torch.sigmoid(self.Vo(final_dist_input))
-            dists = torch.cat([(1 - gate) * generic_dist, gate * entity_dist.view(bsz, -1)], -1) 
+            pointer_prob = torch.sigmoid(self.Vo(final_dist_input)) 
+            dists = torch.cat([(1 - pointer_prob) * generic_dist, pointer_prob * entity_dist.view(bsz, -1)], -1) 
             indices = torch.cat([
               torch.arange(self.n_glove_vocab).repeat(bsz, 1).to(entity),
               entity.view(bsz, -1)
@@ -197,6 +197,7 @@ class CCMModel(nn.Module):
             valid_words = final_dist.size(1)
             final_dist = torch.cat([final_dist, torch.zeros(bsz, self.n_out_vocab - valid_words).to(final_dist)], -1)
             dec_logits[t] = final_dist.unsqueeze(0)
+            pointer_probs[:, t:t+1] = pointer_prob
 
             # if torch.isnan(dec_logits[t]).any():
             #     ipdb.set_trace()
@@ -204,7 +205,7 @@ class CCMModel(nn.Module):
             # logit = self.out(gru_out)  # (bsz, 1, n_vocab)
             # dec_logits[t] = logit.transpose(0, 1)
 
-        return dec_logits.permute(1, 2, 0)
+        return dec_logits.permute(1, 2, 0), pointer_probs # (bsz, rl-1, n_out), (bsz, rl-1)
 
 
 if __name__ == "__main__":
