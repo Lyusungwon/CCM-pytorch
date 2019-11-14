@@ -160,7 +160,7 @@ class CCMModel(nn.Module):
 
         # Decoder
         dec_logits = []
-        pointer_prob = []
+        pointer_probs = []
         t = 0
         response_input = torch.cat([response_emb, res_triple_emb], -1)  # (bsz, rl, d_embed + 3 * t_embed)
         response_vector = response_input[:, 0]  # (bsz, d_embed + 3 * t_embed)
@@ -197,7 +197,8 @@ class CCMModel(nn.Module):
             final_dist_input = torch.cat([gru_state.squeeze(1), context_vector, dynamic_graph, triple_vector], dim=-1) # (bsz, 3*gru_hidden + 5*t_embed)
             generic_dist = F.softmax(self.Wo(final_dist_input), -1) # (bsz, n_vocab)
             entity_dist = dynamic_attn.unsqueeze(-1) * triple_attn # (bsz, pl, tl)
-            pointer_prob = torch.sigmoid(self.Vo(final_dist_input)) 
+            pointer_prob = torch.sigmoid(self.Vo(final_dist_input))
+            pointer_probs.append(pointer_prob)
             dists = torch.cat([(1 - pointer_prob) * generic_dist, pointer_prob * entity_dist.view(bsz, -1)], -1) 
             indices = torch.cat([
               torch.arange(self.n_glove_vocab).repeat(bsz, 1).to(entity),
@@ -206,16 +207,23 @@ class CCMModel(nn.Module):
             out = dists.new_zeros((bsz, self.n_out_vocab))
             final_dist = scatter_add(dists, indices.long(), out=out)
 
-            dec_logits[t] = final_dist.unsqueeze(0)
-            pointer_probs[:, t:t+1] = pointer_prob
+            dec_logits.append(final_dist.unsqueeze(0))
 
-            # if torch.isnan(dec_logits[t]).any():
-            #     ipdb.set_trace()
+            if random.random() < self.teacher_forcing and self.training:
+                response_vector = response_input[:, t + 1] # ground truth
+            else:
+                top1 = final_dist.max(-1)[1]  # (bsz, )
+                finished_index[top1 == EOS_IDX] = 1
+                response_emb = self.word_embedding(top1)  # (bsz, d_embed)
+                response_vector = torch.cat([response_emb, res_triple_emb[:, 0]], -1)  # (bsz, d_embed + 3 * t_embed)
+            t += 1
+            if (self.training and t == rl-1) or \
+                    (not self.training and (finished_index.sum() == bsz or t == self.max_response_len)):
+                break
 
-            # logit = self.out(gru_out)  # (bsz, 1, n_vocab)
-            # dec_logits[t] = logit.transpose(0, 1)
-
-        return dec_logits.permute(1, 2, 0), pointer_probs # (bsz, rl-1, n_out), (bsz, rl-1)
+        dec_logits = torch.cat(dec_logits, 0).permute(1, 2, 0)
+        pointer_probs = torch.cat(pointer_probs, -1)
+        return dec_logits, pointer_probs
 
 
 if __name__ == "__main__":
