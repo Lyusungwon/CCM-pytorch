@@ -213,6 +213,7 @@ class CCMModel(nn.Module):
                 response_vector = response_input[:, t + 1] # ground truth
             else:
                 top1 = final_dist.max(-1)[1]  # (bsz, )
+                top1[top1 >= self.n_glove_vocab] = UNK_IDX
                 finished_index[top1 == EOS_IDX] = 1
                 response_emb = self.word_embedding(top1)  # (bsz, d_embed)
                 response_vector = torch.cat([response_emb, res_triple_emb[:, 0]], -1)  # (bsz, d_embed + 3 * t_embed)
