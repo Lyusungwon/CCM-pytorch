@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 from torch_scatter import scatter_add
 
-from dataloader import DEFAULT_VOCAB, PAD_IDX
+from dataloader import DEFAULT_VOCAB, PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX
 import ipdb
 
 
@@ -40,7 +40,7 @@ def get_pretrained(label_path, weight_path, idx2word, dim=100):
         entity = pd.read_csv(weight_path, sep="\t", header=None, quoting=csv.QUOTE_NONE)
         entity.index = labels
         n = 0
-        
+
         def get_vec(w):
             nonlocal n
             try:
@@ -76,6 +76,9 @@ class CCMModel(nn.Module):
         self.n_glove_vocab = args.n_glove_vocab + len(DEFAULT_VOCAB) # glove only
         self.n_out_vocab = len(idx2word)
         self.gru_layer = args.gru_layer
+        self.t_embed = args.t_embed
+        self.teacher_forcing = args.teacher_forcing
+        self.max_response_len = args.max_response_len
 
         self.word_embedding = nn.Embedding.from_pretrained(
             get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_glove_vocab),
@@ -107,31 +110,35 @@ class CCMModel(nn.Module):
 
     def forward(self, batch):
         post = batch['post']
+        bsz = post.size()[0]
         post_mask = post.eq(PAD_IDX)
         post_length = batch['post_length']
-        response = batch['response']
-        response_length = batch['response_length']
         post_triple = batch['post_triple']
         triple = batch['triple']
         triple_mask = triple.eq(PAD_IDX)
         entity = batch['entity']
-        response_triple = batch['response_triple']
         device = post.device
 
-        bsz, rl = response.size()
         post_emb = self.word_embedding(post)  # (bsz, pl, d_embed)
-        response_emb = self.word_embedding(response)  # (bsz, rl, d_embed)
         head, rel, tail = torch.split(triple, 1, 3)  # (bsz, pl, tl)
         head_emb = self.entity_embedding(head.squeeze(-1))  # (bsz, pl, tl, t_embed)
         rel_emb = self.rel_embedding(rel.squeeze(-1)) # (bsz, pl, tl, t_embed)
         tail_emb = self.entity_embedding(tail.squeeze(-1))  # (bsz, pl, tl, t_embed)
         triple_emb = torch.cat([head_emb, rel_emb, tail_emb], 3)  # (bsz, pl, tl, 3 * t_embed)
+
+        response = batch['response']
+        response[response >= self.n_glove_vocab] = UNK_IDX
+        rl = response.size()[1]
+        response_triple = batch['response_triple']
+        if not self.training:
+            response = torch.ones((bsz, 1), dtype=torch.long, device=device) * SOS_IDX
+            response_triple = torch.ones((bsz, 1, 3), dtype=torch.long, device=device) * NAF_IDX
+        response_emb = self.word_embedding(response)  # (bsz, rl, d_embed)
         res_head, res_rel, res_tail = torch.split(response_triple, 1, 2)  # (bsz, rl, 1)
         res_head_emb = self.entity_embedding(res_head.squeeze(-1))  # (bsz, rl, t_embed)
         res_rel_emb = self.rel_embedding(res_rel.squeeze(-1))  # (bsz, rl, t_embed)
         res_tail_emb = self.entity_embedding(res_tail.squeeze(-1))  # (bsz, rl, t_embed)
         res_triple_emb = torch.cat([res_head_emb, res_rel_emb, res_tail_emb], 2)  # (bsz, rl, 3 * t_embed)
-        # TODO: Transform TransE
 
         # Static Graph
         ent = torch.cat([head_emb, tail_emb], -1)  # (bsz, pl, tl, 2 * t_embed)
@@ -152,35 +159,38 @@ class CCMModel(nn.Module):
         gru_state = gru_hidden.transpose(0, 1).reshape(bsz, 1, -1)
 
         # Decoder
+        dec_logits = []
+        pointer_prob = []
+        t = 0
         response_input = torch.cat([response_emb, res_triple_emb], -1)  # (bsz, rl, d_embed + 3 * t_embed)
-        dec_logits = torch.zeros(rl - 1, bsz, self.n_out_vocab).to(device)
-        pointer_probs = torch.zeros(bsz, rl-1).to(device)
-
-        for t in range(rl - 1):
-            response_vector = response_input[:, t]  # (bsz, d_embed + 3 * t_embed)
-            #c
-            context_logit = (post_output * self.Wa(gru_state)).sum(-1) # (bsz, pl)
+        response_vector = response_input[:, 0]  # (bsz, d_embed + 3 * t_embed)
+        finished_index = torch.zeros(bsz, device=device)
+        while True:
+            # c
+            context_logit = (post_output * self.Wa(gru_state)).sum(-1)  # (bsz, pl)
             context_logit.data.masked_fill_(post_mask, -float('inf'))
             context_attn = F.softmax(context_logit, dim=-1)  # (bsz, pl)
             context_vector = (post_output * context_attn.unsqueeze(-1)).sum(-2, keepdim=False)  # (bsz, gru_hidden) / c
 
-            #cg
+            # cg
             dynamic_logit = self.Vb(torch.tanh(self.Wb(gru_state) + self.Ub(static_graph))).squeeze(-1)  # (bsz, pl)
             dynamic_logit.data.masked_fill_(mask, -float('inf'))
             dynamic_attn = F.softmax(dynamic_logit, dim=-1)  # (bsz, pl)
             dynamic_graph = (static_graph * dynamic_attn.unsqueeze(-1)).sum(-2)  # (bsz, 2 * t_embed) / cg
 
-            #ck
-            triple_logit = (triple_emb * self.Wc(gru_state).unsqueeze(-2)).sum(-1) # (bsz, pl, tl)
+            # ck
+            triple_logit = (triple_emb * self.Wc(gru_state).unsqueeze(-2)).sum(-1)  # (bsz, pl, tl)
             triple_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf'))
             triple_logit.data.masked_fill_(mask.unsqueeze(-1), 0)
-            triple_attn = F.softmax(triple_logit, dim=-1) # (bsz, pl, tl)
+            triple_attn = F.softmax(triple_logit, dim=-1)  # (bsz, pl, tl)
             triple_tmp = (triple_emb * triple_attn.unsqueeze(-1)).sum(-2, keepdim=False)
             triple_tmp.data.masked_fill_(mask.unsqueeze(-1), 0)
-            triple_vector = (triple_tmp * dynamic_attn.unsqueeze(-1)).sum(-2) # (bsz, 3 * t_embed)
+            triple_vector = (triple_tmp * dynamic_attn.unsqueeze(-1)).sum(-2)  # (bsz, 3 * t_embed)
 
-            dec_input = torch.cat([context_vector, dynamic_graph, triple_vector, response_vector], 1).unsqueeze(-2) # (bsz, gru_hidden + 8 * t_embed + d_embed)
-            gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden)  # (bsz, 1, gru_hidden) / (2*gru_hidden, bsz) # NOTE: 2-layer..
+            dec_input = torch.cat([context_vector, dynamic_graph, triple_vector, response_vector], 1).unsqueeze(
+                -2)  # (bsz, gru_hidden + 8 * t_embed + d_embed)
+            gru_out, gru_hidden = self.gru_dec(dec_input,
+                                               gru_hidden)  # (bsz, 1, gru_hidden) / (2*gru_hidden, bsz) # NOTE: 2-layer..
             gru_state = gru_hidden.transpose(0, 1).reshape(bsz, 1, -1)
 
             # pointer-generator logic
@@ -228,7 +238,6 @@ if __name__ == "__main__":
     random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
-    args.n_glove_vocab += 4
 
     from dataloader import get_dataloader
     dataloader = get_dataloader(args=args, batch_size=args.batch_size, shuffle=False)

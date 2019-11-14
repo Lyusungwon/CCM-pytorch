@@ -96,7 +96,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
             pickle.dump(vocab, df)
         
             
-    def init_data(self, data_name):
+    def init_data(self, data_name, n_chunk=1024):
         print(f'Initializing {data_name} data...')
 
         def transform_triple_to_hrt(triple_idx):
@@ -157,23 +157,23 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         
         toread = [f'{self.data_path}/{data_name}set_pieces/{piece}' for piece in os.listdir(f'{self.data_path}/{data_name}set_pieces')]
         n_lines = sum([line_count(piece) for piece in toread])
-        init_n_lines = math.ceil(n_lines / 1024) * 1024 # 마지막 조각 사이즈가 지정된 청크 사이즈보다 작아져서 나는 에러 방지
+        init_n_lines = math.ceil(n_lines / n_chunk) * n_chunk # 마지막 조각 사이즈가 지정된 청크 사이즈보다 작아져서 나는 에러 방지
 
         root = zarr.open(f'{self.data_path}/{data_name}set.zarr', mode='w')
-        post = root.zeros('post', shape=(init_n_lines, self.args.max_sentence_len), chunks=(1024, None), dtype='i4')
-        post_length = root.zeros('post_length', shape=(init_n_lines,), chunks=(1024,), dtype='i4') # valid length (without pad)
-        response = root.zeros('response', shape=(init_n_lines, self.args.max_sentence_len), chunks=(1024, None), dtype='i4')
-        response_length = root.zeros('response_length', shape=(init_n_lines,), chunks=(1024,), dtype='i4')
-        post_triple = root.zeros('post_triple', shape=(init_n_lines, self.args.max_sentence_len), chunks=(1024, None), dtype='i4')
-        triple = root.zeros('triple', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len, 3), chunks=(1024, None, None, None), dtype='i4')
-        entity = root.zeros('entity', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len), chunks=(1024, None, None), dtype='i4')
-        response_triple = root.zeros('response_triple', shape=(init_n_lines, self.args.max_sentence_len, 3), chunks=(1024, None, None), dtype='i4')
+        post = root.zeros('post', shape=(init_n_lines, self.args.max_sentence_len), chunks=(n_chunk, None), dtype='i4')
+        post_length = root.zeros('post_length', shape=(init_n_lines,), chunks=(n_chunk,), dtype='i4') # valid length (without pad)
+        response = root.zeros('response', shape=(init_n_lines, self.args.max_sentence_len), chunks=(n_chunk, None), dtype='i4')
+        response_length = root.zeros('response_length', shape=(init_n_lines,), chunks=(n_chunk,), dtype='i4')
+        post_triple = root.zeros('post_triple', shape=(init_n_lines, self.args.max_sentence_len), chunks=(n_chunk, None), dtype='i4')
+        triple = root.zeros('triple', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len, 3), chunks=(n_chunk, None, None, None), dtype='i4')
+        entity = root.zeros('entity', shape=(init_n_lines, self.args.max_sentence_len, self.args.max_triple_len), chunks=(n_chunk, None, None), dtype='i4')
+        response_triple = root.zeros('response_triple', shape=(init_n_lines, self.args.max_sentence_len, 3), chunks=(n_chunk, None, None), dtype='i4')
 
         pool = Pool(min(len(toread), mp.cpu_count()))
         func = functools.partial(process_file, root)
         iterinp = [(i*self.args.data_piece_size, filename) for i, filename in enumerate(toread)]
         max_post_lens, max_response_lens, max_triple_lens = zip(*tqdm(pool.imap(func, iterinp), total=len(iterinp)))
-        
+
         max_post_len, max_response_len, max_triple_len = max(max_post_lens), max(max_response_lens), max(max_triple_lens)
 
         # trim remaining space

@@ -12,5 +12,5 @@ def criterion(output, pointer_prob, target, pointer_prob_target):
     return nll_loss + pointer_prob_loss, nll_loss
 
 def perplexity(nll_loss):
-    return torch.exp(nll_loss)
+    return torch.exp(nll_loss).mean()
     
