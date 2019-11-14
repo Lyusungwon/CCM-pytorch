@@ -183,6 +183,7 @@ class CCMModel(nn.Module):
             gru_out, gru_hidden = self.gru_dec(dec_input, gru_hidden)  # (bsz, 1, gru_hidden) / (2*gru_hidden, bsz) # NOTE: 2-layer..
             gru_state = gru_hidden.transpose(0, 1).reshape(bsz, 1, -1)
 
+            # pointer-generator logic
             final_dist_input = torch.cat([gru_state.squeeze(1), context_vector, dynamic_graph, triple_vector], dim=-1) # (bsz, 3*gru_hidden + 5*t_embed)
             generic_dist = F.softmax(self.Wo(final_dist_input), -1) # (bsz, n_vocab)
             entity_dist = dynamic_attn.unsqueeze(-1) * triple_attn # (bsz, pl, tl)
@@ -192,10 +193,9 @@ class CCMModel(nn.Module):
               torch.arange(self.n_glove_vocab).repeat(bsz, 1).to(entity),
               entity.view(bsz, -1)
               ], -1)
-            final_dist = scatter_add(dists, indices.long()) # needs to be padded
+            out = dists.new_zeros((bsz, self.n_out_vocab))
+            final_dist = scatter_add(dists, indices.long(), out=out)
 
-            valid_words = final_dist.size(1)
-            final_dist = torch.cat([final_dist, torch.zeros(bsz, self.n_out_vocab - valid_words).to(final_dist)], -1)
             dec_logits[t] = final_dist.unsqueeze(0)
             pointer_probs[:, t:t+1] = pointer_prob
 
