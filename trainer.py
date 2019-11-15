@@ -30,7 +30,7 @@ def epoch(epoch_idx, is_train):
             pointer_prob = pointer_prob[:, :rl-1]
         elif output_len < rl-1:
             pad = torch.zeros((batch_size, output.size()[1], rl-1), device=device)
-            pad[:, :, :output_len+1] = output
+            pad[:, :, :output_len] = output
             output = pad
             pad = torch.zeros((batch_size, rl - 1), device=device)
             pad[:, :output_len + 1] = pointer_prob
@@ -62,7 +62,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--log_interval', type=int, default=100)
+    parser.add_argument('--log_interval', type=int, default=1)
     parser.add_argument('--teacher_forcing', type=float, default=0.5)
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
@@ -76,7 +76,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_response_len', type=int, default=150)
     parser.add_argument('--data_piece_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=41)
-    parser.add_argument('--num_workers', type=int, default=12)
+    parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--no_cuda', action='store_true')
     parser.add_argument('--cuda', type=int, default=0)
     args = parser.parse_args()
@@ -84,8 +84,8 @@ if __name__ == '__main__':
     device = torch.device(f"cuda:{args.cuda}" if not args.no_cuda and torch.cuda.is_available() else "cpu")
     torch.manual_seed(args.seed)
 
-    train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers)
-    val_loader = get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
+    train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size//16, num_workers=args.num_workers)
+    val_loader = get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size//16, num_workers=args.num_workers)
     model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel)
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), args.lr)

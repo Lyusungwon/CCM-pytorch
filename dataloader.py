@@ -13,6 +13,7 @@ import jsonlines
 from tqdm import tqdm
 import numpy as np
 import torch
+import redis
 
 from utils import line_count, pad_1d, pad_2d, append_storage, resize_storage
 
@@ -219,7 +220,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         return len(self.data['post'])
 
     def __getitem__(self, i):
-        return {k: v[i] for k, v in self.data.arrays()}
+        return {k: v[i:i+16] for k, v in self.data.arrays()}
 
     def get_word_idx(self, word):
         res = self.word2idx.get(word, UNK_IDX)
@@ -229,14 +230,23 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
 
 
 def collate_fn(batch):
-    post = torch.tensor([s['post'] for s in batch]) # (bsz, pl)
-    post_length = torch.tensor([s['post_length'] for s in batch]) # (bsz,)
-    response = torch.tensor([s['response'] for s in batch]) # (bsz, rl)
-    response_length = torch.tensor([s['response_length'] for s in batch]) # (bsz,)
-    post_triple = torch.tensor([s['post_triple'] for s in batch]) # (bsz, pl)
-    triple = torch.tensor([s['triple'] for s in batch]) # (bsz, pl, tl, 3) # NOTE: 원래는 pl보다 작지만 (valid-pl-with-triple이므로) 그냥 똑같이 pl로 둠
-    entity = torch.tensor([s['entity'] for s in batch]) # (bsz, pl, tl)
-    response_triple = torch.tensor([s['response_triple'] for s in batch]) # (bsz, rl, 3)
+    # post = torch.tensor([s['post'] for s in batch]) # (bsz, pl)
+    # post_length = torch.tensor([s['post_length'] for s in batch]) # (bsz,)
+    # response = torch.tensor([s['response'] for s in batch]) # (bsz, rl)
+    # response_length = torch.tensor([s['response_length'] for s in batch]) # (bsz,)
+    # post_triple = torch.tensor([s['post_triple'] for s in batch]) # (bsz, pl)
+    # triple = torch.tensor([s['triple'] for s in batch]) # (bsz, pl, tl, 3) # NOTE: 원래는 pl보다 작지만 (valid-pl-with-triple이므로) 그냥 똑같이 pl로 둠
+    # entity = torch.tensor([s['entity'] for s in batch]) # (bsz, pl, tl)
+    # response_triple = torch.tensor([s['response_triple'] for s in batch]) # (bsz, rl, 3)
+
+    post = torch.cat([torch.from_numpy(s['post']) for s in batch], 0) # (bsz, pl)
+    post_length = torch.cat([torch.from_numpy(s['post_length']) for s in batch], 0) # (bsz,)
+    response = torch.cat([torch.from_numpy(s['response']) for s in batch], 0) # (bsz, rl)
+    response_length = torch.cat([torch.from_numpy(s['response_length']) for s in batch], 0) # (bsz,)
+    post_triple = torch.cat([torch.from_numpy(s['post_triple']) for s in batch], 0) # (bsz, pl)
+    triple = torch.cat([torch.from_numpy(s['triple']) for s in batch], 0) # (bsz, pl, tl, 3) # NOTE: 원래는 pl보다 작지만 (valid-pl-with-triple이므로) 그냥 똑같이 pl로 둠
+    entity = torch.cat([torch.from_numpy(s['entity']) for s in batch], 0) # (bsz, pl, tl)
+    response_triple = torch.cat([torch.from_numpy(s['response_triple']) for s in batch], 0) # (bsz, rl, 3)
 
     # HACK to resolve NaN issue (data that are all 0)
     is_nonzero = np.where(triple.view(triple.size(0), -1).sum(-1))
