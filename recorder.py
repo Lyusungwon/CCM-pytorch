@@ -1,6 +1,6 @@
 import time
 import torch
-from dataloader import UNK_IDX, SOS_IDX, EOS_IDX, PAD_IDX
+from dataset import UNK_IDX, SOS_IDX, EOS_IDX, PAD_IDX
 
 
 class Recorder:

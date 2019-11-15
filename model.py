@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 from torch_scatter import scatter_add
 
-from dataloader import DEFAULT_VOCAB, PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX
+from dataset import DEFAULT_VOCAB, PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX
 import ipdb
 
 
@@ -68,13 +68,12 @@ def get_pad_mask(lengths, max_length):
 
 
 class CCMModel(nn.Module):
-    def __init__(self, args, idx2word, idx2rel):
+    def __init__(self, args, dataset):
         super().__init__()
         self.args = args
-        self.idx2word = idx2word # glove + entities
-        self.idx2rel = idx2rel
+        self.dataset = dataset
         self.n_glove_vocab = args.n_glove_vocab + len(DEFAULT_VOCAB) # glove only
-        self.n_out_vocab = len(idx2word)
+        self.n_out_vocab = len(self.dataset.idx2word)
         self.gru_layer = args.gru_layer
         self.t_embed = args.t_embed
         self.teacher_forcing = args.teacher_forcing
@@ -85,11 +84,11 @@ class CCMModel(nn.Module):
             freeze=False, padding_idx=PAD_IDX) # specials: pad, unk, naf_h/t
 
         self.entity_embedding = nn.Embedding.from_pretrained(
-            get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=idx2word),
+            get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=self.dataset.idx2word),
             freeze=False, padding_idx=PAD_IDX)
 
         self.rel_embedding = nn.Embedding.from_pretrained(
-            get_pretrained(label_path=f'{args.data_dir}/relation.txt', weight_path=f'{args.data_dir}/relation_transE.txt', idx2word=idx2rel),
+            get_pretrained(label_path=f'{args.data_dir}/relation.txt', weight_path=f'{args.data_dir}/relation_transE.txt', idx2word=self.dataset.idx2rel),
             freeze=False, padding_idx=PAD_IDX)
 
         self.Wh = nn.Linear(args.t_embed, args.hidden)
@@ -108,6 +107,12 @@ class CCMModel(nn.Module):
 
         # self.out = nn.Linear(args.gru_hidden, self.n_glove_vocab)
 
+    # def retrieve_graph(self, query):
+    #     out = []
+    #     for q in query.view(-1):
+    #         ret = self.dataset.retrieve_graph(q.item())
+    #         out.append(ret)
+            
     def forward(self, batch):
         post = batch['post']
         bsz = post.size()[0]
@@ -216,7 +221,9 @@ class CCMModel(nn.Module):
                 top1[top1 >= self.n_glove_vocab] = UNK_IDX
                 finished_index[top1 == EOS_IDX] = 1
                 response_emb = self.word_embedding(top1)  # (bsz, d_embed)
-                response_vector = torch.cat([response_emb, res_triple_emb[:, 0]], -1)  # (bsz, d_embed + 3 * t_embed)
+                top1_triple_idx = entity_dist.view(bsz, -1).max(-1)[1]
+                top1_triple_emb = triple_emb.view(bsz, -1, triple_emb.size(-1))[torch.arange(bsz), top1_triple_idx]
+                response_vector = torch.cat([response_emb, top1_triple_emb], -1)  # (bsz, d_embed + 3 * t_embed)
             t += 1
             if (self.training and t == rl-1) or \
                     (not self.training and (finished_index.sum() == bsz or t == self.max_response_len)):

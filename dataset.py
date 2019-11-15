@@ -17,6 +17,8 @@ import redis
 
 from utils import line_count, pad_1d, pad_2d, append_storage, resize_storage
 
+import ipdb
+
 DEFAULT_VOCAB = ['_PAD', '_NAF', '_UNK', '_SOS', '_EOS']
 PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX = 0, 1, 2, 3, 4
 NAF_TRIPLE = [NAF_IDX, NAF_IDX, NAF_IDX]
@@ -29,15 +31,15 @@ def get_dataloader(args,
                    shuffle=True,
                    num_workers=4):
     dataset = CommonsenseDialDataset(args, data_path, data_name)
+    sampler = torch.utils.data.SubsetRandomSampler(indices=dataset.valid_indices)
     data_loader = torch.utils.data.DataLoader(dataset=dataset,
                                             batch_size=batch_size,
-                                            shuffle=shuffle,
+                                            sampler=sampler,
                                             num_workers=num_workers,
                                             pin_memory=True,
                                             collate_fn=collate_fn
                                             )
     return data_loader
-
 
 class CommonsenseDialDataset(torch.utils.data.Dataset):
     def __init__(self, args, data_path='data', data_name='train'):
@@ -66,6 +68,9 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         self.data = zarr.open(data_dump, mode='r') # load zarr dump
         self.idx2word = OrderedDict([(v, k) for k, v in self.word2idx.items()])
         self.triple_dict = self.make_triple_dict()
+        self.entity_lst = self.entidx2wordidx.values()
+        self.rd = redis.StrictRedis()
+        
 
     def init_vocab(self):
         # First add DEFAULT_VOCAB
@@ -215,12 +220,15 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
             triple_dict[self.word2idx[k]] = tmp
         return triple_dict
 
-
     def __len__(self):
         return len(self.data['post'])
 
     def __getitem__(self, i):
         return {k: v[i:i+16] for k, v in self.data.arrays()}
+
+    @property
+    def valid_indices(self):
+        return np.arange(len(self), step=16)
 
     def get_word_idx(self, word):
         res = self.word2idx.get(word, UNK_IDX)
@@ -228,17 +236,18 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
             res = UNK_IDX
         return res
 
+    def retrieve_graph(self, query_idx):
+        if query_idx not in self.entity_lst:
+            return [NAF_TRIPLE]
+        query = self.idx2word[query_idx]
+        query_as_head = self.rd.execute_command('GRAPH.QUERY', 'CCM', f"MATCH (x)-[r]->(y) WHERE x.word = '{query}' RETURN r, y.word")
+        query_as_tail = self.rd.execute_command('GRAPH.QUERY', 'CCM', f"MATCH (x)-[r]->(y) WHERE y.word = '{query}' RETURN r, x.word")
+        query_as_head = [(rel[1][1].decode('utf-8'), ent.decode('utf-8')) for rel, ent in query_as_head[1]]
+        query_as_tail = [(rel[1][1].decode('utf-8'), ent.decode('utf-8')) for rel, ent in query_as_tail[1]]
+        return [[query_idx, self.rel2idx[r], self.word2idx[e]] for r, e in query_as_head] + [[self.word2idx[e], self.rel2idx[r], query_idx] for r, e in query_as_tail]
+
 
 def collate_fn(batch):
-    # post = torch.tensor([s['post'] for s in batch]) # (bsz, pl)
-    # post_length = torch.tensor([s['post_length'] for s in batch]) # (bsz,)
-    # response = torch.tensor([s['response'] for s in batch]) # (bsz, rl)
-    # response_length = torch.tensor([s['response_length'] for s in batch]) # (bsz,)
-    # post_triple = torch.tensor([s['post_triple'] for s in batch]) # (bsz, pl)
-    # triple = torch.tensor([s['triple'] for s in batch]) # (bsz, pl, tl, 3) # NOTE: 원래는 pl보다 작지만 (valid-pl-with-triple이므로) 그냥 똑같이 pl로 둠
-    # entity = torch.tensor([s['entity'] for s in batch]) # (bsz, pl, tl)
-    # response_triple = torch.tensor([s['response_triple'] for s in batch]) # (bsz, rl, 3)
-
     post = torch.cat([torch.from_numpy(s['post']) for s in batch], 0) # (bsz, pl)
     post_length = torch.cat([torch.from_numpy(s['post_length']) for s in batch], 0) # (bsz,)
     response = torch.cat([torch.from_numpy(s['response']) for s in batch], 0) # (bsz, rl)

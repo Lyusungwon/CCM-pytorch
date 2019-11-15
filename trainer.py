@@ -7,7 +7,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tensorboardX import SummaryWriter
 
-from dataloader import get_dataloader, PAD_IDX, NAF_IDX
+from dataset import get_dataloader, PAD_IDX, NAF_IDX
 from model import CCMModel
 from recorder import Recorder
 from criterion import criterion, perplexity
@@ -62,8 +62,8 @@ if __name__ == '__main__':
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--log_interval', type=int, default=1)
-    parser.add_argument('--teacher_forcing', type=float, default=0.5)
+    parser.add_argument('--log_interval', type=int, default=100)
+    parser.add_argument('--teacher_forcing', type=float, default=1.0)
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
     parser.add_argument('--hidden', type=int, default=128)
@@ -86,7 +86,7 @@ if __name__ == '__main__':
 
     train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size//16, num_workers=args.num_workers)
     val_loader = get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size//16, num_workers=args.num_workers)
-    model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel)
+    model = CCMModel(args, train_loader.dataset)
     model = model.to(device)
     optimizer = optim.Adam(model.parameters(), args.lr)
     writer = SummaryWriter(f'{args.log_dir}/{args.project}_{args.timestamp}')
