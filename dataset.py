@@ -47,7 +47,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         self.args = args
         self.data_path = data_path
         
-        data_dump = f'{self.data_path}/{data_name}set.zarr'
+        data_dump = f'{self.data_path}/{data_name}set_new.zarr'
         vocab_file = f'{self.data_path}/vocab.pkl'
 
         self.rel2idx = self.make_rel_vocab()
@@ -121,7 +121,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
             post_length = np.zeros((n_sample), dtype=np.int32) # valid length (without pad)
             response = np.zeros((n_sample, self.args.max_sentence_len), dtype=np.int32)
             response_length = np.zeros((n_sample), dtype=np.int32)
-            post_triple = np.zeros((n_sample, self.args.max_sentence_len), dtype=np.int32)
+            # post_triple = np.zeros((n_sample, self.args.max_sentence_len), dtype=np.int32)
             triple = np.zeros((n_sample, self.args.max_sentence_len, self.args.max_triple_len, 3), dtype=np.int32)
             entity = np.zeros((n_sample, self.args.max_sentence_len, self.args.max_triple_len), dtype=np.int32)
             response_triple = np.zeros((n_sample, self.args.max_sentence_len, 3), dtype=np.int32)
@@ -139,21 +139,23 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
                     max_response_len = max(rl, max_response_len)
                     max_triple_len = max([len(l) for l in line['all_triples']] + [max_triple_len])
 
+                    all_triples = [line['all_triples'][i-1] if i > 0 else [-1] for i in line['post_triples']]
+
                     post[i, :pl] = [SOS_IDX] + [self.get_word_idx(p) for p in line['post']] + [EOS_IDX]
                     response[i, :rl] = [SOS_IDX] + [self.get_word_idx(r) for r in line['response']] + [EOS_IDX]
-                    post_triple[i, 1:pl-1] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
-                    response_triple[i, :rl] = [[1, 1, 1]] + [transform_triple_to_hrt(rt) for rt in line['response_triples']] + [[1, 1, 1]]
+                    # post_triple[i, 1:pl-1] = np.array(line['post_triples']) # [0, 0, 1, 0, 2...]
+                    response_triple[i, :rl] = [NAF_TRIPLE] + [transform_triple_to_hrt(rt) for rt in line['response_triples']] + [NAF_TRIPLE]
 
                     # put NAF_TRIPLE/entity at index 0
-                    triple[i] = pad_2d([[NAF_TRIPLE]] + [[transform_triple_to_hrt(t) for t in triples] for triples in line['all_triples']], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
-                    entity[i] = pad_2d([[NAF_IDX]] + [[self.entidx2wordidx[e] for e in entities] for entities in line['all_entities']], length=(self.args.max_sentence_len, self.args.max_triple_len))
+                    triple[i] = pad_2d([[NAF_TRIPLE]] + [[transform_triple_to_hrt(t) for t in triples] for triples in all_triples] + [[NAF_TRIPLE]], length=(self.args.max_sentence_len, self.args.max_triple_len, 3))
+                    entity[i] = pad_2d([[NAF_IDX]] + [[self.entidx2wordidx[e] for e in entities] for entities in line['all_entities']] + [[NAF_IDX]], length=(self.args.max_sentence_len, self.args.max_triple_len))
 
                 # dump to zarr
                 root['post'][start_i : start_i+n_sample] = post
                 root['post_length'][start_i : start_i+n_sample] = post_length
                 root['response'][start_i : start_i+n_sample] = response
                 root['response_length'][start_i : start_i+n_sample] = response_length
-                root['post_triple'][start_i : start_i+n_sample] = post_triple
+                # root['post_triple'][start_i : start_i+n_sample] = post_triple
                 root['triple'][start_i : start_i+n_sample] = triple
                 root['entity'][start_i : start_i+n_sample] = entity
                 root['response_triple'][start_i : start_i+n_sample] = response_triple
@@ -165,7 +167,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         n_lines = sum([line_count(piece) for piece in toread])
         init_n_lines = math.ceil(n_lines / n_chunk) * n_chunk # 마지막 조각 사이즈가 지정된 청크 사이즈보다 작아져서 나는 에러 방지
 
-        root = zarr.open(f'{self.data_path}/{data_name}set.zarr', mode='w')
+        root = zarr.open(f'{self.data_path}/{data_name}set_new.zarr', mode='w')
         post = root.zeros('post', shape=(init_n_lines, self.args.max_sentence_len), chunks=(n_chunk, None), dtype='i4')
         post_length = root.zeros('post_length', shape=(init_n_lines,), chunks=(n_chunk,), dtype='i4') # valid length (without pad)
         response = root.zeros('response', shape=(init_n_lines, self.args.max_sentence_len), chunks=(n_chunk, None), dtype='i4')
@@ -192,7 +194,7 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
         entity.resize(n_lines, max_post_len, max_triple_len)
         response_triple.resize(n_lines, max_response_len, 3)
 
-        print(f'Dumped {data_name} at: {self.data_path}/{data_name}set.zarr')
+        print(f'Dumped {data_name} at: {self.data_path}/{data_name}set_new.zarr')
 
     def make_rel_vocab(self):
         # Don't dump; call every time

@@ -33,7 +33,7 @@ def epoch(epoch_idx, is_train):
             pad[:, :, :output_len] = output
             output = pad
             pad = torch.zeros((batch_size, rl - 1), device=device)
-            pad[:, :output_len + 1] = pointer_prob
+            pad[:, :output_len] = pointer_prob
             pointer_prob = pad
         pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1).to(pointer_prob)
         pointer_prob_target.data.masked_fill_(batch['response'] == 0, PAD_IDX)
