@@ -26,14 +26,18 @@ def get_dataloader(args,
                    data_name='train',
                    batch_size=128,
                    shuffle=True,
-                   num_workers=4):
+                   num_workers=4,
+                   distributed=False):
     dataset = CommonsenseDialDataset(args, data_path, data_name)
+    sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=args.world_size, rank=args.local_rank, shuffle=shuffle) if distributed else None
+    shuffle = shuffle if not distributed else None
     data_loader = torch.utils.data.DataLoader(dataset=dataset,
                                             batch_size=batch_size,
                                             shuffle=shuffle,
                                             num_workers=num_workers,
                                             pin_memory=True,
-                                            collate_fn=collate_fn
+                                            collate_fn=collate_fn,
+                                            sampler=sampler
                                             )
     return data_loader
 

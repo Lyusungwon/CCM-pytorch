@@ -5,6 +5,7 @@ from dataloader import UNK_IDX, SOS_IDX, EOS_IDX, PAD_IDX
 
 class Recorder:
     def __init__(self, args, writer, idx2word):
+        self.distributed = args.distributed
         self.timestamp = args.timestamp
         self.log_interval = args.log_interval
         self.writer = writer
@@ -15,7 +16,7 @@ class Recorder:
         self.epoch_idx = epoch_idx
         self.mode = 'Train' if is_train else 'Val'
         self.batch_num = len(loader)
-        self.dataset_size = len(loader.dataset)
+        self.dataset_size = len(loader.dataset) if not self.distributed else len(loader.sampler)
         self.epoch_loss = 0
         self.epoch_pp = 0
         self.epoch_start_time = time.time()

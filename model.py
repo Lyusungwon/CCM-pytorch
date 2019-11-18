@@ -2,7 +2,6 @@ import csv
 import argparse
 import random
 import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,7 +10,6 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, Packed
 import pandas as pd
 import numpy as np
 from torch_scatter import scatter_add
-
 from dataloader import DEFAULT_VOCAB, PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX
 import ipdb
 

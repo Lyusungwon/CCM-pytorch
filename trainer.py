@@ -1,40 +1,34 @@
 import argparse
 import datetime
-
+import os
 import torch
+import random
+import torch.backends.cudnn as cudnn
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from tensorboardX import SummaryWriter
-
 from dataloader import get_dataloader, PAD_IDX, NAF_IDX
 from model import CCMModel
 from recorder import Recorder
 from criterion import criterion, perplexity
-
+import torch.distributed as dist
+from apex.parallel import DistributedDataParallel as DDP
 import ipdb
 
 
-def epoch(epoch_idx, is_train):
+def epoch(epoch_idx, is_train=True):
     model.train() if is_train else model.eval()
     loader = train_loader if is_train else val_loader
-    recorder.epoch_start(epoch_idx, is_train, loader)
+    if is_train and args.distributed:
+        loader.sampler.set_epoch(epoch_idx)
+    if recorder:
+        recorder.epoch_start(epoch_idx, is_train, loader)
     for batch_idx, batch in enumerate(loader):
-        batch_size, rl = batch['response'].size()
+        batch_size = batch['response'].size()[0]
         batch = {key: val.to(device) for key, val in batch.items()}
         optimizer.zero_grad()
         output, pointer_prob = model(batch)
-        output_len = output.size()[2]
-        if output_len > rl-1:
-            output = output[:, :, :rl-1]
-            pointer_prob = pointer_prob[:, :rl-1]
-        elif output_len < rl-1:
-            pad = torch.zeros((batch_size, output.size()[1], rl-1), device=device)
-            pad[:, :, :output_len+1] = output
-            output = pad
-            pad = torch.zeros((batch_size, rl - 1), device=device)
-            pad[:, :output_len + 1] = pointer_prob
-            pointer_prob = pad
         pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1).to(pointer_prob)
         pointer_prob_target.data.masked_fill_(batch['response'] == 0, PAD_IDX)
         loss, nll_loss = criterion(output, pointer_prob, batch['response'][:, 1:], pointer_prob_target[:, 1:])
@@ -42,15 +36,26 @@ def epoch(epoch_idx, is_train):
         if is_train:
             loss.backward()
             optimizer.step()
-        recorder.batch_end(batch_idx, batch_size, loss.item(), pp.item())
-    recorder.log_text(output, batch)
-    recorder.epoch_end()
+        if recorder:
+            recorder.batch_end(batch_idx, batch_size, loss.item(), pp.item())
+    if recorder:
+        recorder.log_text(output, batch)
+        recorder.epoch_end()
+    if not is_train:
+        return recorder.epoch_loss
 
 
 def train():
+    min_loss = float('inf')
     for epoch_idx in range(1, args.epochs + 1):
         epoch(epoch_idx, is_train=True)
-        epoch(epoch_idx, is_train=False)
+        if args.local_rank == 0:
+            loss = epoch(epoch_idx, is_train=False)
+            if loss < min_loss:
+                min_loss = loss
+                torch.save(model.state_dict(), 'best_model.pt')
+                print(f'Saved the best model with loss {min_loss}')
+
 
 
 if __name__ == '__main__':
@@ -76,20 +81,47 @@ if __name__ == '__main__':
     parser.add_argument('--max_response_len', type=int, default=150)
     parser.add_argument('--data_piece_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=41)
-    parser.add_argument('--num_workers', type=int, default=12)
+    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument('--no_cuda', action='store_true')
-    parser.add_argument('--cuda', type=int, default=0)
     args = parser.parse_args()
 
-    device = torch.device(f"cuda:{args.cuda}" if not args.no_cuda and torch.cuda.is_available() else "cpu")
-    torch.manual_seed(args.seed)
+    if args.seed is not None:
+        random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        cudnn.deterministic = True
 
-    train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers)
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    else:
+        device = torch.device('cpu')
+
+    args.distributed = False
+    if 'WORLD_SIZE' in os.environ:
+        args.world_size = int(os.environ['WORLD_SIZE'])
+        args.distributed = args.world_size > 1
+
+    if args.distributed:
+        # FOR DISTRIBUTED:  Set the device according to local_rank.
+        torch.cuda.set_device(args.local_rank)
+
+        # FOR DISTRIBUTED:  Initialize the backend.  torch.distributed.launch will provide
+        # environment variables, and requires that you use init_method=`env://`.
+        dist.init_process_group(backend='nccl',
+                                init_method='env://')
+
+    # Data loading code
+    train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers, distributed=args.distributed)
     val_loader = get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
-    model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel)
-    model = model.to(device)
+    # create model
+    model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel).to(device)
     optimizer = optim.Adam(model.parameters(), args.lr)
-    writer = SummaryWriter(f'{args.log_dir}/{args.project}_{args.timestamp}')
-    recorder = Recorder(args, writer, train_loader.dataset.idx2word)
+    if args.distributed:
+        model = DDP(model)
+
+    recorder = None
+    if args.local_rank == 0:
+        writer = SummaryWriter(f'{args.log_dir}/{args.project}_{args.timestamp}')
+        recorder = Recorder(args, writer, train_loader.dataset.idx2word)
 
     train()
