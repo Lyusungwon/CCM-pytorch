@@ -9,9 +9,9 @@ import torch.nn.functional as F
 import torch.optim as optim
 from tensorboardX import SummaryWriter
 from dataloader import get_dataloader, PAD_IDX, NAF_IDX
-from model import CCMModel
+from model import CCMModel, Baseline
 from recorder import Recorder
-from criterion import criterion, perplexity
+from criterion import criterion, perplexity, baseline_criterion
 import torch.distributed as dist
 from apex.parallel import DistributedDataParallel as DDP
 import ipdb
@@ -29,9 +29,9 @@ def epoch(epoch_idx, is_train=True):
         batch = {key: val.to(device) for key, val in batch.items()}
         optimizer.zero_grad()
         output, pointer_prob = model(batch)
-        pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1).to(pointer_prob)
+        pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1).to()
         pointer_prob_target.data.masked_fill_(batch['response'] == 0, PAD_IDX)
-        loss, nll_loss = criterion(output, pointer_prob, batch['response'][:, 1:], pointer_prob_target[:, 1:])
+        loss, nll_loss = criterion(output, batch['response'][:, 1:], pointer_prob, pointer_prob_target[:, 1:])
         pp = perplexity(nll_loss)
         if is_train:
             loss.backward()
@@ -41,7 +41,6 @@ def epoch(epoch_idx, is_train=True):
     if recorder:
         recorder.log_text(output, batch)
         recorder.epoch_end()
-    if not is_train:
         return recorder.epoch_loss
 
 
@@ -84,6 +83,7 @@ if __name__ == '__main__':
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument('--no_cuda', action='store_true')
+    parser.add_argument('--baseline', action='store_true')
     args = parser.parse_args()
 
     if args.seed is not None:
@@ -97,6 +97,7 @@ if __name__ == '__main__':
         device = torch.device('cpu')
 
     args.distributed = False
+    args.world_size = 1
     if 'WORLD_SIZE' in os.environ:
         args.world_size = int(os.environ['WORLD_SIZE'])
         args.distributed = args.world_size > 1
@@ -114,14 +115,18 @@ if __name__ == '__main__':
     train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers, distributed=args.distributed)
     val_loader = get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
     # create model
-    model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel).to(device)
+    if not args.baseline:
+        model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel).to(device)
+    else:
+        model = Baseline(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel).to(device)
+        criterion = baseline_criterion
     optimizer = optim.Adam(model.parameters(), args.lr)
     if args.distributed:
         model = DDP(model)
 
     recorder = None
     if args.local_rank == 0:
-        writer = SummaryWriter(f'{args.log_dir}/{args.project}_{args.timestamp}')
+        writer = SummaryWriter(f'{args.log_dir}/{args.project}_{"b" if args.baseline else "c"}_{args.timestamp}')
         recorder = Recorder(args, writer, train_loader.dataset.idx2word)
 
     train()

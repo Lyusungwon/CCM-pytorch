@@ -90,6 +90,7 @@ class CCMModel(nn.Module):
             get_pretrained(label_path=f'{args.data_dir}/relation.txt', weight_path=f'{args.data_dir}/relation_transE.txt', idx2word=idx2rel),
             freeze=False, padding_idx=PAD_IDX)
 
+        self.MLP = nn.Linear(3 * args.t_embed, 3 * args.t_embed)
         self.Wh = nn.Linear(args.t_embed, args.hidden)
         self.Wr = nn.Linear(args.t_embed, args.hidden)
         self.Wt = nn.Linear(args.t_embed, args.hidden)
@@ -122,7 +123,8 @@ class CCMModel(nn.Module):
         head_emb = self.entity_embedding(head.squeeze(-1))  # (bsz, pl, tl, t_embed)
         rel_emb = self.rel_embedding(rel.squeeze(-1)) # (bsz, pl, tl, t_embed)
         tail_emb = self.entity_embedding(tail.squeeze(-1))  # (bsz, pl, tl, t_embed)
-        triple_emb = torch.cat([head_emb, rel_emb, tail_emb], 3)  # (bsz, pl, tl, 3 * t_embed)
+        triple_emb = self.MLP(torch.cat([head_emb, rel_emb, tail_emb], 3))  # (bsz, pl, tl, 3 * t_embed)
+
 
         response = batch['response']
         response[response >= self.n_glove_vocab] = UNK_IDX
@@ -136,7 +138,7 @@ class CCMModel(nn.Module):
         res_head_emb = self.entity_embedding(res_head.squeeze(-1))  # (bsz, rl, t_embed)
         res_rel_emb = self.rel_embedding(res_rel.squeeze(-1))  # (bsz, rl, t_embed)
         res_tail_emb = self.entity_embedding(res_tail.squeeze(-1))  # (bsz, rl, t_embed)
-        res_triple_emb = torch.cat([res_head_emb, res_rel_emb, res_tail_emb], 2)  # (bsz, rl, 3 * t_embed)
+        res_triple_emb = self.MLP(torch.cat([res_head_emb, res_rel_emb, res_tail_emb], 2))  # (bsz, rl, 3 * t_embed)
 
         # Static Graph
         ent = torch.cat([head_emb, tail_emb], -1)  # (bsz, pl, tl, 2 * t_embed)
@@ -225,6 +227,66 @@ class CCMModel(nn.Module):
         return dec_logits, pointer_probs
 
 
+class Baseline(nn.Module):
+    def __init__(self, args, idx2word, idx2rel):
+        super().__init__()
+        self.args = args
+        self.idx2word = idx2word # glove + entities
+        self.idx2rel = idx2rel
+        self.n_glove_vocab = args.n_glove_vocab + len(DEFAULT_VOCAB) # glove only
+        self.n_out_vocab = len(idx2word)
+        self.gru_layer = args.gru_layer
+        self.teacher_forcing = args.teacher_forcing
+        self.max_response_len = args.max_response_len
+
+        self.word_embedding = nn.Embedding.from_pretrained(
+            get_pretrained_glove(path=f'{args.data_dir}/glove.840B.300d.txt', n_word=args.n_glove_vocab),
+            freeze=False, padding_idx=PAD_IDX) # specials: pad, unk, naf_h/t
+        self.gru_enc = nn.GRU(args.d_embed, args.gru_hidden, args.gru_layer, batch_first=True)
+        self.gru_dec = nn.GRU(args.d_embed, args.gru_hidden, args.gru_layer, batch_first=True)
+        self.Wo = nn.Linear(args.gru_hidden, self.n_out_vocab)
+
+    def forward(self, batch):
+        post = batch['post']
+        post_length = batch['post_length']
+        response = batch['response']
+        bsz = post.size()[0]
+        device = post.device
+        rl = response.size()[1]
+
+        post_emb = self.word_embedding(post)  # (bsz, pl, d_embed)
+        response[response >= self.n_glove_vocab] = UNK_IDX
+        response_emb = self.word_embedding(response)  # (bsz, rl, d_embed)
+
+        # Encoder
+        packed_post_input = pack_padded_sequence(post_emb, lengths=post_length.tolist(), batch_first=True)
+        packed_post_output, gru_hidden = self.gru_enc(packed_post_input)
+        post_output, _ = pad_packed_sequence(packed_post_output, batch_first=True)  # (bsz, pl, go)
+
+        # Decoder
+        dec_logits = []
+        t = 0
+        finished_index = torch.zeros((bsz,1), device=device)
+        response_input = response_emb[:, 0:1]
+        while True:
+            t += 1
+            gru_out, gru_hidden = self.gru_dec(response_input, gru_hidden)  # (bsz, 1, gru_hidden) / (2*gru_hidden, bsz) # NOTE: 2-layer..
+            dec_logit = F.softmax(self.Wo(gru_out), -1) # (bsz, n_vocab)
+            dec_logits.append(dec_logit)
+
+            if random.random() < self.teacher_forcing and self.training:
+                response_input = response_emb[:, t:t+1] # ground truth
+            else:
+                top1 = dec_logit.max(-1)[1]  # (bsz, )
+                top1[top1 >= self.n_glove_vocab] = UNK_IDX
+                finished_index[top1 == EOS_IDX] = 1
+                response_input = self.word_embedding(top1)  # (bsz, d_embed)
+            if (self.training and t == rl-1) or \
+                    (not self.training and (finished_index.sum() == bsz or t == self.max_response_len)):
+                break
+        dec_logits = torch.cat(dec_logits, 1).transpose(1, 2)
+        return dec_logits, None
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='parser')
     parser.add_argument('--data_dir', type=str, default='data')
@@ -238,7 +300,9 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--max_sentence_len', type=int, default=150)
     parser.add_argument('--max_triple_len', type=int, default=50)
+    parser.add_argument('--max_response_len', type=int, default=150)
     parser.add_argument('--init_chunk_size', type=int, default=10000)
+    parser.add_argument('--teacher_forcing', type=float, default=0.5)
     parser.add_argument('--seed', type=int, default=41)
     args = parser.parse_args()
 
@@ -249,6 +313,7 @@ if __name__ == "__main__":
     from dataloader import get_dataloader
     dataloader = get_dataloader(args=args, batch_size=args.batch_size, shuffle=False)
 
-    model = CCMModel(args, dataloader.dataset.idx2ent, dataloader.dataset.idx2rel)
+    # model = CCMModel(args, dataloader.dataset.idx2ent, dataloader.dataset.idx2rel)
+    model = Baseline(args, dataloader.dataset.idx2word, dataloader.dataset.idx2rel)
     batch = iter(dataloader).next()
     model(batch)

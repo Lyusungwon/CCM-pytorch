@@ -5,7 +5,8 @@ import torch.nn.functional as F
 from dataloader import PAD_IDX
         
 
-def criterion(output, pointer_prob, target, pointer_prob_target):
+def criterion(output, target, pointer_prob, pointer_prob_target):
+    import ipdb; ipdb.set_trace()
     batch_size, rl = target.size()
     output_len = output.size()[2]
     if output_len > rl:
@@ -29,6 +30,15 @@ def perplexity(nll_loss):
     return torch.exp(nll_loss).mean()
 
 
-def baseline_criterion(output, target):
-    return F.cross_entropy(output, target, ignore_index=PAD_IDX, reduction='mean')
+def baseline_criterion(output, target, pointer_prob=None, pointer_prob_target=None):
+    batch_size, rl = target.size()
+    output_len = output.size()[2]
+    if output_len > rl:
+        output = output[:, :, :rl]
+    elif output_len < rl:
+        pad = torch.zeros((batch_size, output.size()[1], rl), device=output.device)
+        pad[:, :, :output_len] = output
+        output = pad
+    loss = F.cross_entropy(output, target, ignore_index=PAD_IDX, reduction='mean')
+    return loss, loss
 
