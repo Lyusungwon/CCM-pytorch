@@ -1,6 +1,6 @@
 import time
 import torch
-from dataloader import UNK_IDX, SOS_IDX, EOS_IDX, PAD_IDX
+from dataloader import UNK_IDX, SOS_IDX, EOS_IDX, PAD_IDX, BATCH_ACCESS
 
 
 class Recorder:
@@ -15,7 +15,6 @@ class Recorder:
     def epoch_start(self, epoch_idx, is_train, loader):
         self.epoch_idx = epoch_idx
         self.mode = 'Train' if is_train else 'Val'
-        self.batch_num = len(loader)
         self.dataset_size = len(loader.dataset) if not self.distributed else len(loader.sampler)
         self.epoch_loss = 0
         self.epoch_pp = 0
@@ -34,12 +33,12 @@ class Recorder:
             print('Train Batch: {} [{}/{}({:.0f}%)] Loss:{:.4f} / Time:{:.4f}'.format(
                 self.epoch_idx,
                 batch_idx * batch_size, self.dataset_size,
-                100. * batch_idx / self.batch_num,
+                100. * batch_idx * batch_size / self.dataset_size,
                 self.batch_loss,
                 self.batch_time))
-            batch_record_idx = (self.epoch_idx - 1) * (self.batch_num//self.log_interval) + batch_idx // self.log_interval
-            self.writer.add_scalar(f'{self.mode}-Batch loss', self.batch_pp, batch_record_idx)
-            self.writer.add_scalar(f'{self.mode}-Batch perplexity', self.batch_loss, batch_record_idx)
+            batch_record_idx = (self.epoch_idx - 1) * (self.dataset_size//(self.log_interval*batch_size)) + batch_idx // self.log_interval
+            self.writer.add_scalar(f'{self.mode}-Batch loss', self.batch_loss, batch_record_idx)
+            self.writer.add_scalar(f'{self.mode}-Batch perplexity', self.batch_pp, batch_record_idx)
             self.writer.add_scalar(f'{self.mode}-Batch time', self.batch_time, batch_record_idx)
 
     def epoch_end(self):
