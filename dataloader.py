@@ -4,8 +4,8 @@ from ast import literal_eval
 from collections import OrderedDict, defaultdict
 import functools
 import pickle
-import hashlib
-
+from torch.utils.data.distributed import DistributedSampler
+import torch.distributed as dist
 from pathos.helpers import mp
 from pathos.multiprocessing import ProcessingPool as Pool
 import zarr
@@ -13,12 +13,53 @@ import jsonlines
 from tqdm import tqdm
 import numpy as np
 import torch
+import ipdb
 
 from utils import line_count, pad_1d, pad_2d, append_storage, resize_storage
 
 DEFAULT_VOCAB = ['_PAD', '_NAF', '_UNK', '_SOS', '_EOS']
 PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX = 0, 1, 2, 3, 4
 NAF_TRIPLE = [NAF_IDX, NAF_IDX, NAF_IDX]
+BATCH_ACCESS = 16
+
+
+class DistributedBatchSampler(DistributedSampler):
+    def __init__(self, dataset, num_replicas=None, rank=None, shuffle=True, batch_access=1):
+        if num_replicas is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            num_replicas = dist.get_world_size()
+        if rank is None:
+            if not dist.is_available():
+                raise RuntimeError("Requires distributed package to be available")
+            rank = dist.get_rank()
+        self.dataset = dataset
+        self.num_replicas = num_replicas
+        self.rank = rank
+        self.epoch = 0
+        self.num_samples = int(math.ceil(len(self.dataset) * 1.0 / (self.num_replicas * batch_access)))
+        self.total_size = self.num_samples * self.num_replicas * batch_access
+        self.shuffle = shuffle
+        self.batch_access = batch_access
+
+    def __iter__(self):
+        # deterministically shuffle based on epoch
+        g = torch.Generator()
+        g.manual_seed(self.epoch)
+        if self.shuffle:
+            indices = torch.randperm(len(self.dataset), generator=g).tolist()
+        else:
+            indices = list(range(len(self.dataset)))
+
+        # add extra samples to make it evenly divisible
+        indices += indices[:(self.total_size - len(indices))]
+        assert len(indices) == self.total_size
+
+        # subsample
+        indices = indices[self.rank*self.batch_access:self.total_size:self.num_replicas*self.batch_access]
+        assert len(indices) == self.num_samples
+
+        return iter(indices)
 
 
 def get_dataloader(args,
@@ -28,12 +69,11 @@ def get_dataloader(args,
                    shuffle=True,
                    num_workers=4,
                    distributed=False):
+    batch_size = batch_size // BATCH_ACCESS
     dataset = CommonsenseDialDataset(args, data_path, data_name)
-    sampler = torch.utils.data.distributed.DistributedSampler(dataset, num_replicas=args.world_size, rank=args.local_rank, shuffle=shuffle) if distributed else None
-    shuffle = shuffle if not distributed else None
+    sampler = DistributedBatchSampler(dataset=dataset, num_replicas=args.world_size, rank=args.local_rank, shuffle=shuffle)
     data_loader = torch.utils.data.DataLoader(dataset=dataset,
                                             batch_size=batch_size,
-                                            shuffle=shuffle,
                                             num_workers=num_workers,
                                             pin_memory=True,
                                             collate_fn=collate_fn,
@@ -218,12 +258,11 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
             triple_dict[self.word2idx[k]] = tmp
         return triple_dict
 
-
     def __len__(self):
         return len(self.data['post'])
 
     def __getitem__(self, i):
-        return {k: v[i] for k, v in self.data.arrays()}
+        return {k: v[i:i+BATCH_ACCESS] for k, v in self.data.arrays()}
 
     def get_word_idx(self, word):
         res = self.word2idx.get(word, UNK_IDX)
@@ -233,14 +272,14 @@ class CommonsenseDialDataset(torch.utils.data.Dataset):
 
 
 def collate_fn(batch):
-    post = torch.tensor([s['post'] for s in batch]) # (bsz, pl)
-    post_length = torch.tensor([s['post_length'] for s in batch]) # (bsz,)
-    response = torch.tensor([s['response'] for s in batch]) # (bsz, rl)
-    response_length = torch.tensor([s['response_length'] for s in batch]) # (bsz,)
-    post_triple = torch.tensor([s['post_triple'] for s in batch]) # (bsz, pl)
-    triple = torch.tensor([s['triple'] for s in batch]) # (bsz, pl, tl, 3) # NOTE: 원래는 pl보다 작지만 (valid-pl-with-triple이므로) 그냥 똑같이 pl로 둠
-    entity = torch.tensor([s['entity'] for s in batch]) # (bsz, pl, tl)
-    response_triple = torch.tensor([s['response_triple'] for s in batch]) # (bsz, rl, 3)
+    post = torch.cat([torch.from_numpy(s['post']) for s in batch], 0) # (bsz, pl)
+    post_length = torch.cat([torch.from_numpy(s['post_length']) for s in batch], 0) # (bsz,)
+    response = torch.cat([torch.from_numpy(s['response']) for s in batch], 0) # (bsz, rl)
+    response_length = torch.cat([torch.from_numpy(s['response_length']) for s in batch], 0) # (bsz,)
+    post_triple = torch.cat([torch.from_numpy(s['post_triple']) for s in batch], 0) # (bsz, pl)
+    triple = torch.cat([torch.from_numpy(s['triple']) for s in batch], 0) # (bsz, pl, tl, 3) # NOTE: 원래는 pl보다 작지만 (valid-pl-with-triple이므로) 그냥 똑같이 pl로 둠
+    entity = torch.cat([torch.from_numpy(s['entity']) for s in batch], 0) # (bsz, pl, tl)
+    response_triple = torch.cat([torch.from_numpy(s['response_triple']) for s in batch], 0) # (bsz, rl, 3)
 
     # HACK to resolve NaN issue (data that are all 0)
     is_nonzero = np.where(triple.view(triple.size(0), -1).sum(-1))
