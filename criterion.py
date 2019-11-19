@@ -13,10 +13,10 @@ def criterion(output, pointer_prob, target, pointer_prob_target):
         pointer_prob = pointer_prob[:, :rl]
     elif output_len < rl:
         pad = torch.zeros((batch_size, output.size()[1], rl), device=output.device)
-        pad[:, :, :output_len + 1] = output
+        pad[:, :, :output_len] = output
         output = pad
         pad = torch.zeros((batch_size, rl), device=output.device)
-        pad[:, :output_len + 1] = pointer_prob
+        pad[:, :output_len] = pointer_prob
         pointer_prob = pad
 
     # output: logits
@@ -24,6 +24,11 @@ def criterion(output, pointer_prob, target, pointer_prob_target):
     pointer_prob_loss = F.binary_cross_entropy(pointer_prob, pointer_prob_target, reduction='mean')
     return nll_loss + pointer_prob_loss, nll_loss
 
+
 def perplexity(nll_loss):
     return torch.exp(nll_loss).mean()
+
+
+def baseline_criterion(output, target):
+    return F.cross_entropy(output, target, ignore_index=PAD_IDX, reduction='mean')
 
