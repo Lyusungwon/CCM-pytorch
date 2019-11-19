@@ -232,13 +232,10 @@ class CCMModel(nn.Module):
 
 
 class Baseline(nn.Module):
-    def __init__(self, args, idx2word, idx2rel):
+    def __init__(self, args):
         super().__init__()
         self.args = args
-        self.idx2word = idx2word # glove + entities
-        self.idx2rel = idx2rel
         self.n_glove_vocab = args.n_glove_vocab + len(DEFAULT_VOCAB) # glove only
-        self.n_out_vocab = len(idx2word)
         self.gru_layer = args.gru_layer
         self.teacher_forcing = args.teacher_forcing
         self.max_response_len = args.max_response_len
@@ -248,7 +245,7 @@ class Baseline(nn.Module):
             freeze=False, padding_idx=PAD_IDX) # specials: pad, unk, naf_h/t
         self.gru_enc = nn.GRU(args.d_embed, args.gru_hidden, args.gru_layer, batch_first=True)
         self.gru_dec = nn.GRU(args.d_embed, args.gru_hidden, args.gru_layer, batch_first=True)
-        self.Wo = nn.Linear(args.gru_hidden, self.n_out_vocab)
+        self.Wo = nn.Linear(args.gru_hidden, self.n_glove_vocab)
 
     def forward(self, batch):
         post = batch['post']

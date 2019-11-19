@@ -29,7 +29,7 @@ def epoch(epoch_idx, is_train=True):
         batch = {key: val.to(device) for key, val in batch.items()}
         optimizer.zero_grad()
         output, pointer_prob = model(batch)
-        pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1)
+        pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1).to(torch.float)
         pointer_prob_target.data.masked_fill_(batch['response'] == 0, PAD_IDX)
         loss, nll_loss = criterion(output, batch['response'][:, 1:], pointer_prob, pointer_prob_target[:, 1:])
         pp = perplexity(nll_loss)
@@ -116,9 +116,9 @@ if __name__ == '__main__':
     val_loader = get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
     # create model
     if not args.baseline:
-        model = CCMModel(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel).to(device)
+        model = CCMModel(args, train_loader.dataset).to(device)
     else:
-        model = Baseline(args, train_loader.dataset.idx2word, train_loader.dataset.idx2rel).to(device)
+        model = Baseline(args).to(device)
         criterion = baseline_criterion
     optimizer = optim.Adam(model.parameters(), args.lr)
     if args.distributed:

@@ -6,7 +6,6 @@ from dataset import PAD_IDX
         
 
 def criterion(output, target, pointer_prob, pointer_prob_target):
-    import ipdb; ipdb.set_trace()
     batch_size, rl = target.size()
     output_len = output.size()[2]
     if output_len > rl:
