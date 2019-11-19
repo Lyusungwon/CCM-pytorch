@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from dataloader import PAD_IDX
+from dataset import PAD_IDX
         
 
 def criterion(output, target, pointer_prob, pointer_prob_target):

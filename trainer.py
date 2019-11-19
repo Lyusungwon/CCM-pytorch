@@ -8,7 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from tensorboardX import SummaryWriter
-from dataloader import get_dataloader, PAD_IDX, NAF_IDX
+from dataset import get_dataloader, PAD_IDX, NAF_IDX
 from model import CCMModel, Baseline
 from recorder import Recorder
 from criterion import criterion, perplexity, baseline_criterion
@@ -29,7 +29,7 @@ def epoch(epoch_idx, is_train=True):
         batch = {key: val.to(device) for key, val in batch.items()}
         optimizer.zero_grad()
         output, pointer_prob = model(batch)
-        pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1).to()
+        pointer_prob_target = (batch['response_triple'] != NAF_IDX).all(-1)
         pointer_prob_target.data.masked_fill_(batch['response'] == 0, PAD_IDX)
         loss, nll_loss = criterion(output, batch['response'][:, 1:], pointer_prob, pointer_prob_target[:, 1:])
         pp = perplexity(nll_loss)
@@ -67,7 +67,7 @@ if __name__ == '__main__':
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--log_interval', type=int, default=100)
-    parser.add_argument('--teacher_forcing', type=float, default=0.5)
+    parser.add_argument('--teacher_forcing', type=float, default=1.0)
     parser.add_argument('--d_embed', type=int, default=300)
     parser.add_argument('--t_embed', type=int, default=100)
     parser.add_argument('--hidden', type=int, default=128)
@@ -80,7 +80,7 @@ if __name__ == '__main__':
     parser.add_argument('--max_response_len', type=int, default=150)
     parser.add_argument('--data_piece_size', type=int, default=10000)
     parser.add_argument('--seed', type=int, default=41)
-    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--num_workers', type=int, default=6)
     parser.add_argument('--local_rank', type=int, default=0)
     parser.add_argument('--no_cuda', action='store_true')
     parser.add_argument('--baseline', action='store_true')

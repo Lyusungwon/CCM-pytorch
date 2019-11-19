@@ -10,8 +10,7 @@ from torch.nn.utils.rnn import pack_padded_sequence, pad_packed_sequence, Packed
 import pandas as pd
 import numpy as np
 from torch_scatter import scatter_add
-from dataloader import DEFAULT_VOCAB, PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX
-import ipdb
+from dataset import DEFAULT_VOCAB, PAD_IDX, NAF_IDX, UNK_IDX, SOS_IDX, EOS_IDX
 
 
 def get_pretrained_glove(path, n_word=30000):
@@ -66,13 +65,12 @@ def get_pad_mask(lengths, max_length):
 
 
 class CCMModel(nn.Module):
-    def __init__(self, args, idx2word, idx2rel):
+    def __init__(self, args, dataset):
         super().__init__()
         self.args = args
-        self.idx2word = idx2word # glove + entities
-        self.idx2rel = idx2rel
+        self.dataset = dataset
         self.n_glove_vocab = args.n_glove_vocab + len(DEFAULT_VOCAB) # glove only
-        self.n_out_vocab = len(idx2word)
+        self.n_out_vocab = len(self.dataset.idx2word)
         self.gru_layer = args.gru_layer
         self.t_embed = args.t_embed
         self.teacher_forcing = args.teacher_forcing
@@ -83,11 +81,11 @@ class CCMModel(nn.Module):
             freeze=False, padding_idx=PAD_IDX) # specials: pad, unk, naf_h/t
 
         self.entity_embedding = nn.Embedding.from_pretrained(
-            get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=idx2word),
+            get_pretrained(label_path=f'{args.data_dir}/entity.txt', weight_path=f'{args.data_dir}/entity_transE.txt', idx2word=self.dataset.idx2word),
             freeze=False, padding_idx=PAD_IDX)
 
         self.rel_embedding = nn.Embedding.from_pretrained(
-            get_pretrained(label_path=f'{args.data_dir}/relation.txt', weight_path=f'{args.data_dir}/relation_transE.txt', idx2word=idx2rel),
+            get_pretrained(label_path=f'{args.data_dir}/relation.txt', weight_path=f'{args.data_dir}/relation_transE.txt', idx2word=self.dataset.idx2rel),
             freeze=False, padding_idx=PAD_IDX)
 
         self.MLP = nn.Linear(3 * args.t_embed, 3 * args.t_embed)
@@ -105,14 +103,18 @@ class CCMModel(nn.Module):
         self.Vo = nn.Linear(3 * args.gru_hidden + 5 * args.t_embed, 1)
         self.Wo = nn.Linear(3 * args.gru_hidden + 5 * args.t_embed, self.n_glove_vocab)
 
-        # self.out = nn.Linear(args.gru_hidden, self.n_glove_vocab)
-
+    def retrieve_graph(self, query):
+        out = []
+        for q in query.view(-1):
+            ret = self.dataset.retrieve_graph(q.item())
+            out.append(ret)
+            
     def forward(self, batch):
         post = batch['post']
         bsz = post.size()[0]
         post_mask = post.eq(PAD_IDX)
         post_length = batch['post_length']
-        post_triple = batch['post_triple']
+        # post_triple = batch['post_triple']
         triple = batch['triple']
         triple_mask = triple.eq(PAD_IDX)
         entity = batch['entity']
@@ -142,15 +144,15 @@ class CCMModel(nn.Module):
 
         # Static Graph
         ent = torch.cat([head_emb, tail_emb], -1)  # (bsz, pl, tl, 2 * t_embed)
-        mask = get_pad_mask(post_triple.max(-1)[0], ent.size(1)).to(device)
-        ent.data.masked_fill_(mask.view(*mask.size(), 1, 1), 0)
+        # mask = get_pad_mask(post_triple.max(-1)[0], ent.size(1)).to(device)
+        # ent.data.masked_fill_(mask.view(*mask.size(), 1, 1), 0)
         static_logit = (self.Wr(rel_emb) * torch.tanh(self.Wh(head_emb) + self.Wt(tail_emb))).sum(-1, keepdim=False)  # (bsz, pl, tl)
-        static_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf')) # pad 부분 가림
-        static_logit.data.masked_fill_(mask.unsqueeze(-1), 0)
+        static_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf'))
+        static_logit.data.masked_fill_(post_mask.unsqueeze(-1), 0)
         static_attn = F.softmax(static_logit, dim=-1)  # (bsz, pl, tl) # TODO: NAN
         static_graph = (ent * static_attn.unsqueeze(-1)).sum(-2)  # (bsz, pl, 2 * t_embed) / gi
-        post_triples = static_graph.gather(1, post_triple.unsqueeze(-1).expand_as(static_graph))
-        post_input = torch.cat([post_emb, post_triples], -1)  # (bsz, pl, d_emb + 2 * t_embed)
+        # post_triples = static_graph.gather(1, post_triple.unsqueeze(-1).expand_as(static_graph))
+        post_input = torch.cat([post_emb, static_graph], -1)  # (bsz, pl, d_emb + 2 * t_embed)
 
         # Encoder
         packed_post_input = pack_padded_sequence(post_input, lengths=post_length.tolist(), batch_first=True)
@@ -174,17 +176,17 @@ class CCMModel(nn.Module):
 
             # cg
             dynamic_logit = self.Vb(torch.tanh(self.Wb(gru_state) + self.Ub(static_graph))).squeeze(-1)  # (bsz, pl)
-            dynamic_logit.data.masked_fill_(mask, -float('inf'))
+            dynamic_logit.data.masked_fill_(post_mask, -float('inf'))
             dynamic_attn = F.softmax(dynamic_logit, dim=-1)  # (bsz, pl)
             dynamic_graph = (static_graph * dynamic_attn.unsqueeze(-1)).sum(-2)  # (bsz, 2 * t_embed) / cg
 
             # ck
             triple_logit = (triple_emb * self.Wc(gru_state).unsqueeze(-2)).sum(-1)  # (bsz, pl, tl)
             triple_logit.data.masked_fill_(triple_mask[:, :, :, 0], -float('inf'))
-            triple_logit.data.masked_fill_(mask.unsqueeze(-1), 0)
+            triple_logit.data.masked_fill_(post_mask.unsqueeze(-1), 0)
             triple_attn = F.softmax(triple_logit, dim=-1)  # (bsz, pl, tl)
             triple_tmp = (triple_emb * triple_attn.unsqueeze(-1)).sum(-2, keepdim=False)
-            triple_tmp.data.masked_fill_(mask.unsqueeze(-1), 0)
+            triple_tmp.data.masked_fill_(post_mask.unsqueeze(-1), 0)
             triple_vector = (triple_tmp * dynamic_attn.unsqueeze(-1)).sum(-2)  # (bsz, 3 * t_embed)
 
             dec_input = torch.cat([context_vector, dynamic_graph, triple_vector, response_vector], 1).unsqueeze(
@@ -216,7 +218,9 @@ class CCMModel(nn.Module):
                 top1[top1 >= self.n_glove_vocab] = UNK_IDX
                 finished_index[top1 == EOS_IDX] = 1
                 response_emb = self.word_embedding(top1)  # (bsz, d_embed)
-                response_vector = torch.cat([response_emb, res_triple_emb[:, 0]], -1)  # (bsz, d_embed + 3 * t_embed)
+                top1_triple_idx = entity_dist.view(bsz, -1).max(-1)[1]
+                top1_triple_emb = triple_emb.view(bsz, -1, triple_emb.size(-1))[torch.arange(bsz), top1_triple_idx]
+                response_vector = torch.cat([response_emb, top1_triple_emb], -1)  # (bsz, d_embed + 3 * t_embed)
             t += 1
             if (self.training and t == rl-1) or \
                     (not self.training and (finished_index.sum() == bsz or t == self.max_response_len)):
