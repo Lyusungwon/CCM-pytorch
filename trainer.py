@@ -64,6 +64,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='data')
     parser.add_argument('--log_dir', type=str, default='log')
     parser.add_argument('--batch_size', type=int, default=64)
+    parser.add_argument('--batch_access', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--log_interval', type=int, default=100)
