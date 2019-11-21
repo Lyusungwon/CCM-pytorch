@@ -6,13 +6,13 @@ from dataset import UNK_IDX, SOS_IDX, EOS_IDX, PAD_IDX
 class Recorder:
     def __init__(self, args, writer, idx2word):
         self.distributed = args.distributed
-        self.timestamp = args.timestamp
+        self.exp_name = args.exp_name
         self.log_interval = args.log_interval
         self.writer = writer
         self.idx2word = idx2word
         self.batch_access = args.batch_access
         self.batch_size = args.batch_size
-        print(f'Record {self.timestamp}')
+        print(f'Record {self.exp_name}')
 
     def epoch_start(self, epoch_idx, is_train, loader):
         self.epoch_idx = epoch_idx

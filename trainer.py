@@ -35,6 +35,7 @@ def epoch(epoch_idx, is_train=True):
         pp = perplexity(nll_loss)
         if is_train:
             loss.backward()
+            nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip) # NOTE: add
             optimizer.step()
         if recorder:
             recorder.batch_end(batch_idx, batch_size, loss.item(), pp.item())
@@ -60,13 +61,14 @@ def train():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='parser')
     parser.add_argument('--project', type=str, default='ccm')
-    parser.add_argument('--timestamp', type=str, default=datetime.datetime.now().strftime("%y%m%d%H%M%S"))
+    parser.add_argument('--exp_name', type=str, default=datetime.datetime.now().strftime("%y%m%d%H%M%S"))
     parser.add_argument('--data_dir', type=str, default='data')
     parser.add_argument('--log_dir', type=str, default='log')
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--batch_access', type=int, default=16)
     parser.add_argument('--epochs', type=int, default=100)
     parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--grad_clip', type=float, default=5)
     parser.add_argument('--log_interval', type=int, default=100)
     parser.add_argument('--teacher_forcing', type=float, default=1.0)
     parser.add_argument('--d_embed', type=int, default=300)
@@ -113,7 +115,7 @@ if __name__ == '__main__':
                                 init_method='env://')
 
     # Data loading code
-    train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers, distributed=args.distributed)
+    train_loader = get_dataloader(args, data_path=args.data_dir, data_name='train', batch_size=args.batch_size, num_workers=args.num_workers)
     val_loader = get_dataloader(args, data_path=args.data_dir, data_name='valid', batch_size=args.batch_size, num_workers=args.num_workers)
     # create model
     if not args.baseline:
@@ -127,7 +129,7 @@ if __name__ == '__main__':
 
     recorder = None
     if args.local_rank == 0:
-        writer = SummaryWriter(f'{args.log_dir}/{args.project}_{"b" if args.baseline else "c"}_{args.timestamp}')
+        writer = SummaryWriter(f'{args.log_dir}/{args.project}_{"b" if args.baseline else "c"}_{args.exp_name}')
         recorder = Recorder(args, writer, train_loader.dataset.idx2word)
 
     train()
