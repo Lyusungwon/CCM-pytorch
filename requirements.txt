@@ -1,5 +1,5 @@
 numpy
-torch==1.2.0
+torch==2.2.0
 zarr==2.3.2
 pathos
 jsonlines
